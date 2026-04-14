@@ -17,12 +17,15 @@ class TradeEvent:
     entry_price: float
     exit_price: float
     pnl: float
+    exit_reason: str = ""
+    duration_bars: int = 0
 
 
 @dataclass
 class ActionExecution:
     requested_direction: str
     executed_direction: str
+    regime_valid_for_entry: bool = False
     realized_pnl: float = 0.0
     position_changes: int = 0
     agent_order_executed: bool = False
@@ -30,6 +33,10 @@ class ActionExecution:
     agent_close_executed: bool = False
     blocked: bool = False
     blocked_reason: Optional[str] = None
+    forced_hold_by_regime_filter: bool = False
+    ignored_due_to_open_position: bool = False
+    attempted_reversal: bool = False
+    prevented_same_candle_reversal: bool = False
 
 
 class TradingEnv(gym.Env):
@@ -91,6 +98,13 @@ class TradingEnv(gym.Env):
         self.cooldown_steps_remaining = 0
         self.margin_call_triggered = False
         self.blocked_trade_reason_counts = self._empty_blocked_reason_counts()
+        self.exit_reason_counts = self._empty_exit_reason_counts()
+        self.attempted_reversal_count = 0
+        self.prevented_same_candle_reversal_count = 0
+        self.blocked_by_regime_filter_count = 0
+        self.trades_allowed_by_regime_filter_count = 0
+        self.valid_regime_bar_count = 0
+        self.regime_bar_count = 0
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None):
         super().reset(seed=seed)
@@ -112,6 +126,13 @@ class TradingEnv(gym.Env):
         self.cooldown_steps_remaining = 0
         self.margin_call_triggered = False
         self.blocked_trade_reason_counts = self._empty_blocked_reason_counts()
+        self.exit_reason_counts = self._empty_exit_reason_counts()
+        self.attempted_reversal_count = 0
+        self.prevented_same_candle_reversal_count = 0
+        self.blocked_by_regime_filter_count = 0
+        self.trades_allowed_by_regime_filter_count = 0
+        self.valid_regime_bar_count = 0
+        self.regime_bar_count = 0
 
         return self._get_obs(), {}
 
@@ -122,6 +143,16 @@ class TradingEnv(gym.Env):
             "min_notional": 0,
             "volume_min": 0,
             "invalid_stop_distance": 0,
+        }
+
+    @staticmethod
+    def _empty_exit_reason_counts() -> dict[str, int]:
+        return {
+            "take_profit": 0,
+            "stop_loss": 0,
+            "agent_close": 0,
+            "margin_call": 0,
+            "episode_end": 0,
         }
 
     def _register_blocked_trade(self, reason: str) -> None:
@@ -135,6 +166,26 @@ class TradingEnv(gym.Env):
         if raw_action < -threshold:
             return "SELL"
         return "HOLD"
+
+    def _regime_value(self, idx: int, raw_col: str, fallback_col: str) -> float:
+        safe_idx = min(max(int(idx), 0), len(self.df) - 1)
+        if raw_col in self.df.columns:
+            return float(self.df.iloc[safe_idx][raw_col])
+        if fallback_col in self.df.columns:
+            return float(self.df.iloc[safe_idx][fallback_col])
+        return 0.0
+
+    def _is_valid_regime(self, idx: int) -> bool:
+        dist_ema_240 = self._regime_value(idx, "regime_dist_ema_240_raw", "dist_ema_240")
+        vol_regime_z = self._regime_value(idx, "regime_vol_regime_z_raw", "vol_regime_z")
+        breakout_up_10 = self._regime_value(idx, "regime_breakout_up_10_flag", "breakout_up_10")
+        breakout_down_10 = self._regime_value(idx, "regime_breakout_down_10_flag", "breakout_down_10")
+        return (
+            abs(dist_ema_240) >= 0.01
+            or vol_regime_z > 0.0
+            or breakout_up_10 == 1.0
+            or breakout_down_10 == 1.0
+        )
 
     def _price(self, idx: int) -> float:
         safe_idx = min(max(int(idx), 0), len(self.price_array) - 1)
@@ -200,7 +251,7 @@ class TradingEnv(gym.Env):
 
         return float(volume), False, None
 
-    def _close_position(self, price: float) -> float:
+    def _close_position(self, price: float, exit_reason: str = "agent_close") -> float:
         if self.position == 0:
             return 0.0
 
@@ -209,6 +260,7 @@ class TradingEnv(gym.Env):
         pnl = (price - self.entry_price) * self.position * units - cost
         self.balance += pnl
         side = "LONG" if self.position == 1 else "SHORT"
+        duration_bars = max(0, int(self.current_step) - int(self.entry_step))
 
         self.trades.append(
             TradeEvent(
@@ -216,11 +268,14 @@ class TradingEnv(gym.Env):
                 entry_price=self.entry_price,
                 exit_price=price,
                 pnl=pnl,
+                exit_reason=exit_reason,
+                duration_bars=duration_bars,
             )
         )
         self.trade_count += 1
         if pnl > 0:
             self.win_count += 1
+        self.exit_reason_counts[exit_reason] = self.exit_reason_counts.get(exit_reason, 0) + 1
 
         self.position = 0
         self.entry_price = 0.0
@@ -270,25 +325,43 @@ class TradingEnv(gym.Env):
             executed_direction=executed_direction,
         )
 
-        if target_position != self.position:
-            # Fecha posição existente se necessário
-            if self.position != 0:
-                result.realized_pnl += self._close_position(price)
+        opposite_reversal_requested = (
+            self.position != 0 and trade_direction in ("BUY", "SELL") and target_position == -self.position
+        )
+        if opposite_reversal_requested:
+            result.attempted_reversal = True
+
+        if self.position != 0:
+            if bool(self.cfg.force_exit_only_by_tp_sl):
+                if trade_direction != "HOLD":
+                    result.ignored_due_to_open_position = True
+                    if opposite_reversal_requested:
+                        result.prevented_same_candle_reversal = True
+                result.executed_direction = "BUY" if self.position == 1 else "SELL"
+                return result
+
+            if opposite_reversal_requested:
+                result.realized_pnl += self._close_position(price, exit_reason="agent_close")
                 result.position_changes += 1
                 result.agent_close_executed = True
                 result.agent_order_executed = True
+                result.prevented_same_candle_reversal = True
+                result.executed_direction = "HOLD"
+                return result
 
-            # Abre nova posição
-            if target_position != 0:
-                open_pnl, opened, blocked_reason = self._open_position(target_position, price, dynamic_risk_pct)
-                result.realized_pnl += open_pnl
-                if opened:
-                    result.position_changes += 1
-                    result.executed_entry = True
-                    result.agent_order_executed = True
-                elif blocked_reason is not None:
-                    result.blocked = True
-                    result.blocked_reason = blocked_reason
+            result.executed_direction = "BUY" if self.position == 1 else "SELL"
+            return result
+
+        if target_position != 0:
+            open_pnl, opened, blocked_reason = self._open_position(target_position, price, dynamic_risk_pct)
+            result.realized_pnl += open_pnl
+            if opened:
+                result.position_changes += 1
+                result.executed_entry = True
+                result.agent_order_executed = True
+            elif blocked_reason is not None:
+                result.blocked = True
+                result.blocked_reason = blocked_reason
 
         result.executed_direction = "BUY" if self.position == 1 else "SELL" if self.position == -1 else "HOLD"
         return result
@@ -300,9 +373,9 @@ class TradingEnv(gym.Env):
 
         move = ((price - self.entry_price) / (self.entry_price + 1e-12)) * self.position
         if move <= -self.cfg.stop_loss_pct:
-            return self._close_position(price), 1
+            return self._close_position(price, exit_reason="stop_loss"), 1
         if move >= self.cfg.take_profit_pct:
-            return self._close_position(price), 1
+            return self._close_position(price, exit_reason="take_profit"), 1
         return 0.0, 0
 
     def _get_obs(self) -> np.ndarray:
@@ -351,11 +424,44 @@ class TradingEnv(gym.Env):
 
         current_price = self._price(self.current_step)
         starting_cooldown = self.cooldown_steps_remaining
+        position_at_step_start = int(self.position)
+        regime_valid = self._is_valid_regime(self.current_step)
+        self.regime_bar_count += 1
+        self.valid_regime_bar_count += int(regime_valid)
+
+        requested_trade_direction = trade_direction
+        regime_forced_hold = False
+        if position_at_step_start == 0 and requested_trade_direction != "HOLD":
+            if regime_valid:
+                self.trades_allowed_by_regime_filter_count += 1
+            else:
+                self.blocked_by_regime_filter_count += 1
+                trade_direction = "HOLD"
+                regime_forced_hold = True
+
         realized_pnl, position_changes = self._check_stop_take(current_price)
-        action_result = self._apply_action(trade_direction, current_price, dynamic_risk_pct)
+        if bool(self.cfg.force_exit_only_by_tp_sl) and position_at_step_start != 0:
+            action_result = ActionExecution(
+                requested_direction=requested_trade_direction,
+                executed_direction="BUY" if self.position == 1 else "SELL" if self.position == -1 else "HOLD",
+                regime_valid_for_entry=regime_valid,
+            )
+            if requested_trade_direction != "HOLD":
+                action_result.ignored_due_to_open_position = True
+                requested_target = 1 if requested_trade_direction == "BUY" else -1
+                if requested_target == -position_at_step_start:
+                    action_result.attempted_reversal = True
+                    action_result.prevented_same_candle_reversal = True
+        else:
+            action_result = self._apply_action(trade_direction, current_price, dynamic_risk_pct)
+            action_result.requested_direction = requested_trade_direction
+            action_result.regime_valid_for_entry = regime_valid
+            action_result.forced_hold_by_regime_filter = regime_forced_hold
         realized_pnl += action_result.realized_pnl
         position_changes += action_result.position_changes
         self.agent_order_count += int(action_result.agent_close_executed) + int(action_result.executed_entry)
+        self.attempted_reversal_count += int(action_result.attempted_reversal)
+        self.prevented_same_candle_reversal_count += int(action_result.prevented_same_candle_reversal)
 
         unrealized = self._unrealized_pnl(current_price)
         self.equity = self.balance + unrealized
@@ -367,7 +473,7 @@ class TradingEnv(gym.Env):
             self.margin_call_triggered = True
             margin_call = True
             if self.position != 0:
-                forced_close_pnl = self._close_position(current_price)
+                forced_close_pnl = self._close_position(current_price, exit_reason="margin_call")
                 realized_pnl += forced_close_pnl
             unrealized = 0.0
             self.equity = self.balance
@@ -383,7 +489,7 @@ class TradingEnv(gym.Env):
 
         if terminated and not margin_call and self.position != 0:
             final_price = self._price(self.current_step)
-            terminal_close_pnl = self._close_position(final_price)
+            terminal_close_pnl = self._close_position(final_price, exit_reason="episode_end")
             realized_pnl += terminal_close_pnl
             unrealized = 0.0
             self.equity = self.balance
@@ -473,6 +579,11 @@ class TradingEnv(gym.Env):
             info["agent_close_executed"] = bool(action_result.agent_close_executed)
             info["blocked_trade_step"] = bool(action_result.blocked)
             info["blocked_trade_reason"] = action_result.blocked_reason
+            info["regime_valid_for_entry"] = bool(action_result.regime_valid_for_entry)
+            info["forced_hold_by_regime_filter"] = bool(action_result.forced_hold_by_regime_filter)
+            info["ignored_due_to_open_position"] = bool(action_result.ignored_due_to_open_position)
+            info["attempted_reversal_step"] = bool(action_result.attempted_reversal)
+            info["prevented_same_candle_reversal_step"] = bool(action_result.prevented_same_candle_reversal)
         if self.trades:
             t = self.trades[-1]
             info["last_trade"] = {
@@ -480,6 +591,8 @@ class TradingEnv(gym.Env):
                 "entry_price": float(t.entry_price),
                 "exit_price": float(t.exit_price),
                 "pnl": float(t.pnl),
+                "exit_reason": t.exit_reason,
+                "duration_bars": int(t.duration_bars),
             }
         return info
 
@@ -497,6 +610,26 @@ class TradingEnv(gym.Env):
         total_profit = float(self.equity - self.cfg.initial_balance)
         win_rate = float(self.win_count / self.trade_count) if self.trade_count > 0 else 0.0
         profit_per_trade = float(total_profit / self.trade_count) if self.trade_count > 0 else 0.0
+        win_pnls = [float(t.pnl) for t in self.trades if t.pnl > 0]
+        loss_pnls = [float(t.pnl) for t in self.trades if t.pnl < 0]
+        trade_durations = [float(t.duration_bars) for t in self.trades]
+        average_trade_duration_bars = float(np.mean(trade_durations)) if trade_durations else 0.0
+        average_win = float(np.mean(win_pnls)) if win_pnls else 0.0
+        average_loss = float(np.mean(loss_pnls)) if loss_pnls else 0.0
+        payoff_ratio = float(average_win / abs(average_loss)) if average_loss < 0 else 0.0
+        gross_win = float(np.sum(win_pnls)) if win_pnls else 0.0
+        gross_loss = float(abs(np.sum(loss_pnls))) if loss_pnls else 0.0
+        profit_factor = float(gross_win / gross_loss) if gross_loss > 0 else 0.0
+        exit_by_take_profit = float(self.exit_reason_counts.get("take_profit", 0))
+        exit_by_stop_loss = float(self.exit_reason_counts.get("stop_loss", 0))
+        exit_by_agent_close = float(self.exit_reason_counts.get("agent_close", 0))
+        exit_by_margin_call = float(self.exit_reason_counts.get("margin_call", 0))
+        exit_by_episode_end = float(self.exit_reason_counts.get("episode_end", 0))
+        trades_closed_by_tp_pct = float(exit_by_take_profit / self.trade_count) if self.trade_count > 0 else 0.0
+        trades_closed_by_sl_pct = float(exit_by_stop_loss / self.trade_count) if self.trade_count > 0 else 0.0
+        pct_bars_with_valid_regime = (
+            float(self.valid_regime_bar_count / self.regime_bar_count) if self.regime_bar_count > 0 else 0.0
+        )
 
         return {
             "total_profit": total_profit,
@@ -508,7 +641,24 @@ class TradingEnv(gym.Env):
             "blocked_by_min_notional": float(self.blocked_trade_reason_counts.get("min_notional", 0)),
             "blocked_by_volume_min": float(self.blocked_trade_reason_counts.get("volume_min", 0)),
             "blocked_by_invalid_stop_distance": float(self.blocked_trade_reason_counts.get("invalid_stop_distance", 0)),
+            "blocked_by_regime_filter": float(self.blocked_by_regime_filter_count),
+            "trades_allowed_by_regime_filter": float(self.trades_allowed_by_regime_filter_count),
+            "pct_bars_with_valid_regime": pct_bars_with_valid_regime,
             "blocked_trade_rate": blocked_trade_rate,
+            "attempted_reversals": float(self.attempted_reversal_count),
+            "prevented_same_candle_reversals": float(self.prevented_same_candle_reversal_count),
+            "exit_by_take_profit": exit_by_take_profit,
+            "exit_by_stop_loss": exit_by_stop_loss,
+            "exit_by_agent_close": exit_by_agent_close,
+            "exit_by_margin_call": exit_by_margin_call,
+            "exit_by_episode_end": exit_by_episode_end,
+            "average_trade_duration_bars": average_trade_duration_bars,
+            "average_win": average_win,
+            "average_loss": average_loss,
+            "payoff_ratio": payoff_ratio,
+            "profit_factor": profit_factor,
+            "trades_closed_by_tp_pct": trades_closed_by_tp_pct,
+            "trades_closed_by_sl_pct": trades_closed_by_sl_pct,
             "win_rate": win_rate,
             "profit_per_trade": profit_per_trade,
             "final_equity": float(self.equity),

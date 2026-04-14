@@ -23,7 +23,7 @@ class HyperliquidConfig:
     private_key: Optional[str] = None
     network: str = "mainnet"
     symbol: str = "BTC"
-    timeframe: str = "5m"
+    timeframe: str = "1h"
     history_bars: int = 10_000
     live_window_bars: int = 2_000
 
@@ -31,7 +31,7 @@ class HyperliquidConfig:
 @dataclass
 class DataConfig:
     source: str = "csv"
-    csv_path: Optional[str] = "data/binance_btcusdt_m5.csv"
+    csv_path: Optional[str] = "data/binance_btcusdt_h1.csv"
     timestamp_column: str = "timestamp"
 
 
@@ -50,17 +50,18 @@ class EnvironmentConfig:
     simulation_initial_balance: Optional[float] = None
     max_risk_per_trade: float = 0.02
     min_risk_per_trade: float = 0.001
-    action_hold_threshold: float = 0.30
+    action_hold_threshold: float = 0.60
     taker_fee_pct: float = 0.00045
     slippage_pct: float = 0.00010
-    stop_loss_pct: float = 0.005
-    take_profit_pct: float = 0.01
+    stop_loss_pct: float = 0.02
+    take_profit_pct: float = 0.05
+    force_exit_only_by_tp_sl: bool = True
     reward_clip_limit: float = 5.0
-    pain_decay_factor: float = 0.01
-    overtrade_penalty: float = 0.002
-    blocked_trade_penalty: float = 0.001
-    close_profit_bonus: float = 0.02
-    close_loss_penalty: float = 0.02
+    pain_decay_factor: float = 0.0
+    overtrade_penalty: float = 0.0
+    blocked_trade_penalty: float = 0.0
+    close_profit_bonus: float = 0.0
+    close_loss_penalty: float = 0.0
     broker_min_notional_usd: float = 10.0
     use_broker_constraints: bool = True
     broker_volume_min: float = 0.0001
@@ -70,7 +71,7 @@ class EnvironmentConfig:
     broker_point: float = 1.0
     block_trade_on_excess_risk: bool = False
     max_episode_steps: Optional[int] = None
-    trade_cooldown_steps: int = 12
+    trade_cooldown_steps: int = 1
     margin_call_drawdown_pct: float = 0.8
     margin_call_penalty: float = 10.0
 
@@ -95,7 +96,7 @@ class TrainingConfig:
     device: str = "auto"
     num_envs: int = 1
     episode_steps: int = 10_000
-    model_name: str = "ppo_btc_m5"
+    model_name: str = "ppo_btc_h1"
     train_split: float = 0.7
     seed: int = 42
     log_interval_steps: int = 5_000
@@ -114,7 +115,7 @@ class ExecutionConfig:
     validation_balance: float = 250.0
     ensemble_enabled: bool = True
     ensemble_model_names: list[str] = field(
-        default_factory=lambda: ["ppo_btc_m5_s123", "ppo_btc_m5_s512", "ppo_btc_m5_s2004"]
+        default_factory=lambda: ["ppo_btc_h1_s123", "ppo_btc_h1_s512", "ppo_btc_h1_s2004"]
     )
     allow_live_trading: bool = False
     min_seconds_between_orders: int = 10

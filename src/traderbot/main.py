@@ -36,9 +36,26 @@ def build_metric_snapshot(metrics: dict) -> dict[str, float]:
         "max_drawdown",
         "profit_per_trade",
         "num_trades",
+        "blocked_trades",
+        "blocked_by_regime_filter",
+        "trades_allowed_by_regime_filter",
+        "pct_bars_with_valid_regime",
         "win_rate",
         "blocked_trade_rate",
         "final_equity",
+        "exit_by_take_profit",
+        "exit_by_stop_loss",
+        "exit_by_agent_close",
+        "exit_by_margin_call",
+        "attempted_reversals",
+        "prevented_same_candle_reversals",
+        "average_trade_duration_bars",
+        "average_win",
+        "average_loss",
+        "payoff_ratio",
+        "profit_factor",
+        "trades_closed_by_tp_pct",
+        "trades_closed_by_sl_pct",
     ]
     return {key: float(metrics.get(key, 0.0)) for key in keys}
 
@@ -75,6 +92,51 @@ def split_train_test(df, train_split: float):
     return train_df, test_df
 
 
+def _infer_bar_minutes(df) -> float | None:
+    if len(df.index) < 2:
+        return None
+    diffs = df.index.to_series().sort_values().diff().dropna()
+    if diffs.empty:
+        return None
+    return float(diffs.dt.total_seconds().median() / 60.0)
+
+
+def _resample_ohlcv_to_timeframe(raw, timeframe: str, logger):
+    target_minutes = TIMEFRAME_MINUTES_MAP.get(str(timeframe).upper())
+    if target_minutes is None or target_minutes <= 0:
+        return raw
+
+    source_minutes = _infer_bar_minutes(raw)
+    if source_minutes is None:
+        return raw
+
+    if target_minutes <= round(source_minutes):
+        return raw
+
+    rule = f"{int(target_minutes)}min"
+    logger.info(
+        "Reamostrando histórico para %s | origem~%.0fmin | destino=%smin",
+        timeframe,
+        source_minutes,
+        target_minutes,
+    )
+    resampled = raw.resample(rule, label="right", closed="right").agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+            "spread": "mean",
+            "real_volume": "sum",
+        }
+    )
+    resampled = resampled.dropna(subset=["open", "high", "low", "close", "volume"])
+    if resampled.empty:
+        raise ValueError(f"Reamostragem para {timeframe} gerou dataset vazio.")
+    return resampled
+
+
 def prepare_datasets(cfg: AppConfig, logger):
     source = str(cfg.data.source).lower().strip()
     if source == "csv":
@@ -89,10 +151,15 @@ def prepare_datasets(cfg: AppConfig, logger):
         finally:
             loader.disconnect()
 
+    raw = _resample_ohlcv_to_timeframe(raw, cfg.hyperliquid.timeframe, logger)
     logger.info("Histórico carregado: %s linhas", len(raw))
 
     fe = FeatureEngineer(cfg.features)
     feat_df = fe.build(raw)
+    feat_df["regime_dist_ema_240_raw"] = feat_df["dist_ema_240"].astype(float)
+    feat_df["regime_vol_regime_z_raw"] = feat_df["vol_regime_z"].astype(float)
+    feat_df["regime_breakout_up_10_flag"] = (feat_df["breakout_up_10"] > 0.0).astype(float)
+    feat_df["regime_breakout_down_10_flag"] = (feat_df["breakout_down_10"] > 0.0).astype(float)
     cols = default_feature_columns()
 
     train_df, test_df = split_train_test(feat_df, cfg.training.train_split)
@@ -253,10 +320,28 @@ def train_multi_pipeline(cfg: AppConfig, logger, seeds: list[int]):
                 "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
                 "num_trades": float(metrics.get("num_trades", 0.0)),
                 "blocked_trades": float(metrics.get("blocked_trades", 0.0)),
+                "blocked_by_regime_filter": float(metrics.get("blocked_by_regime_filter", 0.0)),
+                "trades_allowed_by_regime_filter": float(metrics.get("trades_allowed_by_regime_filter", 0.0)),
+                "pct_bars_with_valid_regime": float(metrics.get("pct_bars_with_valid_regime", 0.0)),
                 "blocked_trade_rate": float(metrics.get("blocked_trade_rate", 0.0)),
                 "win_rate": float(metrics.get("win_rate", 0.0)),
                 "profit_per_trade": float(metrics.get("profit_per_trade", 0.0)),
                 "final_equity": float(metrics.get("final_equity", 0.0)),
+                "exit_by_take_profit": float(metrics.get("exit_by_take_profit", 0.0)),
+                "exit_by_stop_loss": float(metrics.get("exit_by_stop_loss", 0.0)),
+                "exit_by_agent_close": float(metrics.get("exit_by_agent_close", 0.0)),
+                "exit_by_margin_call": float(metrics.get("exit_by_margin_call", 0.0)),
+                "attempted_reversals": float(metrics.get("attempted_reversals", 0.0)),
+                "prevented_same_candle_reversals": float(
+                    metrics.get("prevented_same_candle_reversals", 0.0)
+                ),
+                "average_trade_duration_bars": float(metrics.get("average_trade_duration_bars", 0.0)),
+                "average_win": float(metrics.get("average_win", 0.0)),
+                "average_loss": float(metrics.get("average_loss", 0.0)),
+                "payoff_ratio": float(metrics.get("payoff_ratio", 0.0)),
+                "profit_factor": float(metrics.get("profit_factor", 0.0)),
+                "trades_closed_by_tp_pct": float(metrics.get("trades_closed_by_tp_pct", 0.0)),
+                "trades_closed_by_sl_pct": float(metrics.get("trades_closed_by_sl_pct", 0.0)),
                 "train_total_trades": float(metrics.get("train_total_trades", 0.0)),
                 "accepted": bool(metrics.get("accepted", False)),
                 "acceptance_reason": str(metrics.get("acceptance_reason", "")),
@@ -415,9 +500,31 @@ def backtest_pipeline(cfg: AppConfig, logger, model_path: str | None):
                     "max_drawdown": float(result.metrics.get("max_drawdown", 0.0)),
                     "num_trades": float(result.metrics.get("num_trades", 0.0)),
                     "blocked_trades": float(result.metrics.get("blocked_trades", 0.0)),
+                    "blocked_by_regime_filter": float(result.metrics.get("blocked_by_regime_filter", 0.0)),
+                    "trades_allowed_by_regime_filter": float(
+                        result.metrics.get("trades_allowed_by_regime_filter", 0.0)
+                    ),
+                    "pct_bars_with_valid_regime": float(result.metrics.get("pct_bars_with_valid_regime", 0.0)),
                     "win_rate": float(result.metrics.get("win_rate", 0.0)),
                     "profit_per_trade": float(result.metrics.get("profit_per_trade", 0.0)),
                     "final_equity": float(result.metrics.get("final_equity", 0.0)),
+                    "exit_by_take_profit": float(result.metrics.get("exit_by_take_profit", 0.0)),
+                    "exit_by_stop_loss": float(result.metrics.get("exit_by_stop_loss", 0.0)),
+                    "exit_by_agent_close": float(result.metrics.get("exit_by_agent_close", 0.0)),
+                    "exit_by_margin_call": float(result.metrics.get("exit_by_margin_call", 0.0)),
+                    "attempted_reversals": float(result.metrics.get("attempted_reversals", 0.0)),
+                    "prevented_same_candle_reversals": float(
+                        result.metrics.get("prevented_same_candle_reversals", 0.0)
+                    ),
+                    "average_trade_duration_bars": float(
+                        result.metrics.get("average_trade_duration_bars", 0.0)
+                    ),
+                    "average_win": float(result.metrics.get("average_win", 0.0)),
+                    "average_loss": float(result.metrics.get("average_loss", 0.0)),
+                    "payoff_ratio": float(result.metrics.get("payoff_ratio", 0.0)),
+                    "profit_factor": float(result.metrics.get("profit_factor", 0.0)),
+                    "trades_closed_by_tp_pct": float(result.metrics.get("trades_closed_by_tp_pct", 0.0)),
+                    "trades_closed_by_sl_pct": float(result.metrics.get("trades_closed_by_sl_pct", 0.0)),
                 }
             )
 
@@ -443,9 +550,35 @@ def backtest_pipeline(cfg: AppConfig, logger, model_path: str | None):
                 "max_drawdown": float(ensemble_result.metrics.get("max_drawdown", 0.0)),
                 "num_trades": float(ensemble_result.metrics.get("num_trades", 0.0)),
                 "blocked_trades": float(ensemble_result.metrics.get("blocked_trades", 0.0)),
+                "blocked_by_regime_filter": float(
+                    ensemble_result.metrics.get("blocked_by_regime_filter", 0.0)
+                ),
+                "trades_allowed_by_regime_filter": float(
+                    ensemble_result.metrics.get("trades_allowed_by_regime_filter", 0.0)
+                ),
+                "pct_bars_with_valid_regime": float(
+                    ensemble_result.metrics.get("pct_bars_with_valid_regime", 0.0)
+                ),
                 "win_rate": float(ensemble_result.metrics.get("win_rate", 0.0)),
                 "profit_per_trade": float(ensemble_result.metrics.get("profit_per_trade", 0.0)),
                 "final_equity": float(ensemble_result.metrics.get("final_equity", 0.0)),
+                "exit_by_take_profit": float(ensemble_result.metrics.get("exit_by_take_profit", 0.0)),
+                "exit_by_stop_loss": float(ensemble_result.metrics.get("exit_by_stop_loss", 0.0)),
+                "exit_by_agent_close": float(ensemble_result.metrics.get("exit_by_agent_close", 0.0)),
+                "exit_by_margin_call": float(ensemble_result.metrics.get("exit_by_margin_call", 0.0)),
+                "attempted_reversals": float(ensemble_result.metrics.get("attempted_reversals", 0.0)),
+                "prevented_same_candle_reversals": float(
+                    ensemble_result.metrics.get("prevented_same_candle_reversals", 0.0)
+                ),
+                "average_trade_duration_bars": float(
+                    ensemble_result.metrics.get("average_trade_duration_bars", 0.0)
+                ),
+                "average_win": float(ensemble_result.metrics.get("average_win", 0.0)),
+                "average_loss": float(ensemble_result.metrics.get("average_loss", 0.0)),
+                "payoff_ratio": float(ensemble_result.metrics.get("payoff_ratio", 0.0)),
+                "profit_factor": float(ensemble_result.metrics.get("profit_factor", 0.0)),
+                "trades_closed_by_tp_pct": float(ensemble_result.metrics.get("trades_closed_by_tp_pct", 0.0)),
+                "trades_closed_by_sl_pct": float(ensemble_result.metrics.get("trades_closed_by_sl_pct", 0.0)),
                 "ensemble_size": float(ensemble_result.metrics.get("ensemble_size", 0.0)),
                 "vote_hold_total": float(ensemble_result.metrics.get("vote_hold_total", 0.0)),
                 "vote_buy_total": float(ensemble_result.metrics.get("vote_buy_total", 0.0)),

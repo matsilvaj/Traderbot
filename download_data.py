@@ -18,6 +18,7 @@ except ImportError as exc:  # pragma: no cover
 TIMEFRAME_MS = {
     "1m": 60_000,
     "5m": 300_000,
+    "1h": 3_600_000,
 }
 
 

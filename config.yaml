@@ -12,13 +12,13 @@ hyperliquid:
   private_key: null     # Deixe null para ler do .env
   network: mainnet      # mainnet ou testnet
   symbol: BTC           # Na HL o ativo é apenas BTC (e não BTCUSD)
-  timeframe: 5m         # Formato CCXT/HL
+  timeframe: 1h         # Formato CCXT/HL
   history_bars: 10000
   live_window_bars: 2000
 
 data:
   source: csv
-  csv_path: data/binance_btcusdt_m5.csv
+  csv_path: data/binance_btcusdt_h1.csv
   timestamp_column: timestamp
 
 features:
@@ -33,19 +33,20 @@ environment:
   simulation_initial_balance: 250.0
   max_risk_per_trade: 0.02
   min_risk_per_trade: 0.001
-  action_hold_threshold: 0.30
+  action_hold_threshold: 0.60
 
   # NOVAS TAXAS (Substituem spread_bps e slippage_bps)
   taker_fee_pct: 0.00045   # 0.045% - Taxa Base Taker da HL (Tier 0)
   slippage_pct: 0.00010    # 0.01% - Estimativa de escorregamento da ordem a mercado
-  stop_loss_pct: 0.005
-  take_profit_pct: 0.01
+  stop_loss_pct: 0.02
+  take_profit_pct: 0.05
+  force_exit_only_by_tp_sl: true
   reward_clip_limit: 5.0
-  pain_decay_factor: 0.01
-  overtrade_penalty: 0.002
-  blocked_trade_penalty: 0.001
-  close_profit_bonus: 0.02
-  close_loss_penalty: 0.02
+  pain_decay_factor: 0.0
+  overtrade_penalty: 0.0
+  blocked_trade_penalty: 0.0
+  close_profit_bonus: 0.0
+  close_loss_penalty: 0.0
   broker_min_notional_usd: 10.0
   use_broker_constraints: true
 
@@ -57,7 +58,7 @@ environment:
   broker_point: 1.0
   block_trade_on_excess_risk: false
   max_episode_steps: null
-  trade_cooldown_steps: 12
+  trade_cooldown_steps: 1
   margin_call_drawdown_pct: 0.8
   margin_call_penalty: 10.0
 
@@ -81,7 +82,7 @@ training:
   device: cpu
   num_envs: 6
   episode_steps: 10000
-  model_name: ppo_btc_m5
+  model_name: ppo_btc_h1
   train_split: 0.7
   seed: null
   log_interval_steps: 5000
@@ -98,9 +99,9 @@ execution:
   validation_balance: 250.0
   ensemble_enabled: true
   ensemble_model_names:
-    - ppo_btc_m5_s123
-    - ppo_btc_m5_s512
-    - ppo_btc_m5_s2004
+    - ppo_btc_h1_s123
+    - ppo_btc_h1_s512
+    - ppo_btc_h1_s2004
   allow_live_trading: false
   min_seconds_between_orders: 10
 

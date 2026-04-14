@@ -62,6 +62,8 @@ def _build_backtest_result(env: TradingEnv, metrics: dict[str, float]) -> Backte
                 "entry_price": t.entry_price,
                 "exit_price": t.exit_price,
                 "pnl": t.pnl,
+                "exit_reason": t.exit_reason,
+                "duration_bars": t.duration_bars,
             }
             for t in env.trades
         ]
@@ -243,6 +245,13 @@ def print_metrics(metrics: dict[str, Any]) -> str:
         f"Drawdown máximo: {metrics['max_drawdown']:.2%} | "
         f"Trades: {int(metrics['num_trades'])} | "
         f"Bloqueados: {int(metrics.get('blocked_trades', 0))} | "
+        f"Regime ok: {metrics.get('pct_bars_with_valid_regime', 0.0):.2%} | "
+        f"Bloq.regime: {int(metrics.get('blocked_by_regime_filter', 0))} | "
         f"Profit/trade: {metrics.get('profit_per_trade', 0.0):.4f} | "
-        f"Taxa de acerto: {metrics['win_rate']:.2%}"
+        f"Taxa de acerto: {metrics['win_rate']:.2%} | "
+        f"PF: {metrics.get('profit_factor', 0.0):.2f} | "
+        f"TP/SL/Agent: {int(metrics.get('exit_by_take_profit', 0))}/"
+        f"{int(metrics.get('exit_by_stop_loss', 0))}/"
+        f"{int(metrics.get('exit_by_agent_close', 0))} | "
+        f"Rev. evitadas: {int(metrics.get('prevented_same_candle_reversals', 0))}"
     )

@@ -83,6 +83,8 @@ class HyperliquidExecutor:
         self.paper_entry_distance_from_ema_240 = 0.0
         self.live_entry_opened_at: Optional[float] = None
         self.live_entry_distance_from_ema_240 = 0.0
+        self.paper_cooldown_until_ts = 0.0
+        self.live_cooldown_until_ts = 0.0
         self.market_cache: Optional[pd.DataFrame] = None
 
     def _base_url(self) -> str:
@@ -126,6 +128,8 @@ class HyperliquidExecutor:
         self.paper_entry_distance_from_ema_240 = 0.0
         self.live_entry_opened_at = None
         self.live_entry_distance_from_ema_240 = 0.0
+        self.paper_cooldown_until_ts = 0.0
+        self.live_cooldown_until_ts = 0.0
         self.market_cache = None
 
         wallet_address = self._clean_secret(self.hl_cfg.wallet_address)
@@ -237,6 +241,28 @@ class HyperliquidExecutor:
         minutes = TIMEFRAME_MINUTES_MAP.get(str(self.hl_cfg.timeframe).upper(), 1)
         return max(60.0, float(minutes) * 60.0)
 
+    def _trade_cooldown_seconds(self) -> float:
+        return max(0.0, float(max(int(self.env_cfg.trade_cooldown_steps), 0)) * self._timeframe_seconds())
+
+    def _set_trade_cooldown(self, mode: str) -> None:
+        cooldown_until = time.time() + self._trade_cooldown_seconds()
+        if str(mode).lower() == "paper":
+            self.paper_cooldown_until_ts = cooldown_until
+        else:
+            self.live_cooldown_until_ts = cooldown_until
+
+    def _is_trade_cooldown_active(self, mode: str) -> bool:
+        now = time.time()
+        if str(mode).lower() == "paper":
+            return now < float(self.paper_cooldown_until_ts)
+        return now < float(self.live_cooldown_until_ts)
+
+    def _trade_cooldown_remaining_seconds(self, mode: str) -> float:
+        now = time.time()
+        if str(mode).lower() == "paper":
+            return max(0.0, float(self.paper_cooldown_until_ts) - now)
+        return max(0.0, float(self.live_cooldown_until_ts) - now)
+
     def _position_bars(self, opened_at: Optional[float]) -> float:
         if opened_at is None:
             return 0.0
@@ -341,6 +367,10 @@ class HyperliquidExecutor:
             dynamic_risk_pct = max(dynamic_risk_pct, float(self.env_cfg.min_risk_per_trade))
         return dynamic_risk_pct
 
+    @staticmethod
+    def _is_opposite_signal(trade_direction: str, side: int) -> bool:
+        return (side == 1 and trade_direction == "SELL") or (side == -1 and trade_direction == "BUY")
+
     def _paper_close_position(self, price: float) -> dict:
         if self.paper_position == 0 or self.paper_volume <= 0:
             return {"closed": False, "reason": "no_open_position"}
@@ -364,6 +394,7 @@ class HyperliquidExecutor:
         self.paper_volume = 0.0
         self.paper_entry_opened_at = None
         self.paper_entry_distance_from_ema_240 = 0.0
+        self._set_trade_cooldown("paper")
         return snapshot
 
     def _paper_check_stop_take(self) -> dict | None:
@@ -451,6 +482,35 @@ class HyperliquidExecutor:
     def _response_ok(self, response) -> bool:
         return isinstance(response, dict) and response.get("status") == "ok"
 
+    def _close_live_position(self, snapshot: dict, price: float, timestamp: str, trigger: str) -> dict:
+        if self.exchange is None:
+            return {
+                "ok": False,
+                "mode": self.exec_cfg.mode,
+                "timestamp": timestamp,
+                "error": "Hyperliquid exchange is not initialized for close.",
+            }
+
+        response = self.exchange.market_close(
+            str(self.hl_cfg.symbol),
+            sz=float(snapshot["volume"]),
+            px=price,
+            slippage=float(self.slippage_pct),
+        )
+        self.last_order_ts = time.time()
+        if self._response_ok(response):
+            self.live_entry_opened_at = None
+            self.live_entry_distance_from_ema_240 = 0.0
+            self._set_trade_cooldown("live")
+        return {
+            "ok": self._response_ok(response),
+            "mode": self.exec_cfg.mode,
+            "timestamp": timestamp,
+            "trigger": trigger,
+            "response": response,
+            "position_snapshot": self.get_position_snapshot(),
+        }
+
     def _maybe_close_live_position(self, timestamp: str) -> dict | None:
         snapshot = self.get_position_snapshot()
         if snapshot["side"] == 0 or snapshot["avg_entry_price"] <= 0:
@@ -467,32 +527,7 @@ class HyperliquidExecutor:
         if trigger is None:
             return None
 
-        if self.exchange is None:
-            return {
-                "ok": False,
-                "mode": self.exec_cfg.mode,
-                "timestamp": timestamp,
-                "error": "Hyperliquid exchange is not initialized for close.",
-            }
-
-        response = self.exchange.market_close(
-            str(self.hl_cfg.symbol),
-            sz=float(snapshot["volume"]),
-            px=current_price,
-            slippage=float(self.slippage_pct),
-        )
-        self.last_order_ts = time.time()
-        if self._response_ok(response):
-            self.live_entry_opened_at = None
-            self.live_entry_distance_from_ema_240 = 0.0
-        return {
-            "ok": self._response_ok(response),
-            "mode": self.exec_cfg.mode,
-            "timestamp": timestamp,
-            "trigger": trigger,
-            "response": response,
-            "position_snapshot": self.get_position_snapshot(),
-        }
+        return self._close_live_position(snapshot, current_price, timestamp, trigger)
 
     def execute(self, decision: ExecutionDecision) -> dict:
         """Execute a continuous action in [-1, 1]."""
@@ -503,6 +538,102 @@ class HyperliquidExecutor:
 
         if self.exec_cfg.mode.lower() == "paper":
             stop_take_event = self._paper_check_stop_take()
+            if stop_take_event is not None:
+                return {
+                    "ok": True,
+                    "mode": "paper",
+                    "timestamp": timestamp,
+                    "action": raw_action,
+                    "trade_direction": trade_direction,
+                    "dynamic_risk_pct": dynamic_risk_pct,
+                    "reason": decision.reason,
+                    "volume": 0.0,
+                    "sizing": None,
+                    "entry_cost": 0.0,
+                    "opened_position": False,
+                    "open_price": None,
+                    "paper_balance": self.paper_balance,
+                    "position_snapshot": self.get_position_snapshot(),
+                    "stop_take_event": stop_take_event,
+                    "force_exit_only_by_tp_sl": bool(self.env_cfg.force_exit_only_by_tp_sl),
+                }
+
+            current_side = int(self.paper_position)
+            attempted_reversal = self._is_opposite_signal(trade_direction, current_side)
+            if current_side != 0:
+                if bool(self.env_cfg.force_exit_only_by_tp_sl):
+                    return {
+                        "ok": True,
+                        "mode": "paper",
+                        "timestamp": timestamp,
+                        "action": raw_action,
+                        "trade_direction": trade_direction,
+                        "dynamic_risk_pct": dynamic_risk_pct,
+                        "reason": decision.reason,
+                        "message": "Position locked until TP/SL, margin call, or end of episode.",
+                        "ignored_signal": trade_direction != "HOLD",
+                        "attempted_reversal": attempted_reversal,
+                        "prevented_same_candle_reversal": attempted_reversal,
+                        "paper_balance": self.paper_balance,
+                        "position_snapshot": self.get_position_snapshot(),
+                        "stop_take_event": None,
+                        "force_exit_only_by_tp_sl": True,
+                    }
+
+                if attempted_reversal:
+                    close_event = self._paper_close_position(self._get_mid_price())
+                    close_event["trigger"] = "agent_close"
+                    return {
+                        "ok": True,
+                        "mode": "paper",
+                        "timestamp": timestamp,
+                        "action": raw_action,
+                        "trade_direction": trade_direction,
+                        "dynamic_risk_pct": dynamic_risk_pct,
+                        "reason": decision.reason,
+                        "opened_position": False,
+                        "closed_position": bool(close_event.get("closed", False)),
+                        "attempted_reversal": True,
+                        "prevented_same_candle_reversal": True,
+                        "close_event": close_event,
+                        "paper_balance": self.paper_balance,
+                        "position_snapshot": self.get_position_snapshot(),
+                        "stop_take_event": None,
+                        "force_exit_only_by_tp_sl": False,
+                    }
+
+                return {
+                    "ok": True,
+                    "mode": "paper",
+                    "timestamp": timestamp,
+                    "action": raw_action,
+                    "trade_direction": trade_direction,
+                    "dynamic_risk_pct": dynamic_risk_pct,
+                    "reason": decision.reason,
+                    "message": "Position maintained on this bar.",
+                    "ignored_signal": trade_direction != "HOLD",
+                    "attempted_reversal": False,
+                    "prevented_same_candle_reversal": False,
+                    "paper_balance": self.paper_balance,
+                    "position_snapshot": self.get_position_snapshot(),
+                    "stop_take_event": None,
+                    "force_exit_only_by_tp_sl": False,
+                }
+
+            if trade_direction != "HOLD" and self._is_trade_cooldown_active("paper"):
+                return {
+                    "ok": False,
+                    "mode": "paper",
+                    "timestamp": timestamp,
+                    "action": raw_action,
+                    "trade_direction": trade_direction,
+                    "dynamic_risk_pct": dynamic_risk_pct,
+                    "reason": decision.reason,
+                    "error": "Waiting for trade cooldown after the previous exit.",
+                    "cooldown_remaining_seconds": self._trade_cooldown_remaining_seconds("paper"),
+                    "force_exit_only_by_tp_sl": bool(self.env_cfg.force_exit_only_by_tp_sl),
+                }
+
             sizing = None
             paper_volume = 0.0
             if trade_direction != "HOLD":
@@ -544,6 +675,7 @@ class HyperliquidExecutor:
                 "paper_balance": self.paper_balance,
                 "position_snapshot": self.get_position_snapshot(),
                 "stop_take_event": stop_take_event,
+                "force_exit_only_by_tp_sl": bool(self.env_cfg.force_exit_only_by_tp_sl),
             }
 
         if not self.exec_cfg.allow_live_trading:
@@ -572,6 +704,75 @@ class HyperliquidExecutor:
         if stop_take_result is not None:
             return stop_take_result
 
+        current_snapshot = self.get_position_snapshot()
+        if current_snapshot["side"] != 0:
+            attempted_reversal = self._is_opposite_signal(trade_direction, int(current_snapshot["side"]))
+            if bool(self.env_cfg.force_exit_only_by_tp_sl):
+                return {
+                    "ok": True,
+                    "mode": self.exec_cfg.mode,
+                    "timestamp": timestamp,
+                    "action": raw_action,
+                    "trade_direction": trade_direction,
+                    "dynamic_risk_pct": dynamic_risk_pct,
+                    "reason": decision.reason,
+                    "message": "Position locked until stop/take, margin call, or end of episode.",
+                    "ignored_signal": trade_direction != "HOLD",
+                    "attempted_reversal": attempted_reversal,
+                    "prevented_same_candle_reversal": attempted_reversal,
+                    "position_snapshot": current_snapshot,
+                    "force_exit_only_by_tp_sl": True,
+                }
+
+            if attempted_reversal:
+                if not self._can_send_now():
+                    return {
+                        "ok": False,
+                        "mode": self.exec_cfg.mode,
+                        "timestamp": timestamp,
+                        "action": raw_action,
+                        "trade_direction": trade_direction,
+                        "dynamic_risk_pct": dynamic_risk_pct,
+                        "error": "Waiting for cooldown between orders.",
+                        "attempted_reversal": True,
+                        "position_snapshot": current_snapshot,
+                    }
+                result = self._close_live_position(current_snapshot, self._get_mid_price(), timestamp, "agent_close")
+                result["action"] = raw_action
+                result["trade_direction"] = trade_direction
+                result["dynamic_risk_pct"] = dynamic_risk_pct
+                result["reason"] = decision.reason
+                result["attempted_reversal"] = True
+                result["prevented_same_candle_reversal"] = True
+                result["force_exit_only_by_tp_sl"] = False
+                return result
+
+            return {
+                "ok": True,
+                "mode": self.exec_cfg.mode,
+                "timestamp": timestamp,
+                "action": raw_action,
+                "trade_direction": trade_direction,
+                "dynamic_risk_pct": dynamic_risk_pct,
+                "reason": decision.reason,
+                "message": "Position maintained on this bar.",
+                "position_snapshot": current_snapshot,
+                "force_exit_only_by_tp_sl": False,
+            }
+
+        if trade_direction != "HOLD" and self._is_trade_cooldown_active("live"):
+            return {
+                "ok": False,
+                "mode": self.exec_cfg.mode,
+                "timestamp": timestamp,
+                "action": raw_action,
+                "trade_direction": trade_direction,
+                "dynamic_risk_pct": dynamic_risk_pct,
+                "error": "Waiting for trade cooldown after the previous exit.",
+                "cooldown_remaining_seconds": self._trade_cooldown_remaining_seconds("live"),
+                "force_exit_only_by_tp_sl": bool(self.env_cfg.force_exit_only_by_tp_sl),
+            }
+
         if not self._can_send_now():
             return {
                 "ok": False,
@@ -581,19 +782,6 @@ class HyperliquidExecutor:
                 "trade_direction": trade_direction,
                 "dynamic_risk_pct": dynamic_risk_pct,
                 "error": "Waiting for cooldown between orders.",
-            }
-
-        current_snapshot = self.get_position_snapshot()
-        if current_snapshot["side"] != 0:
-            return {
-                "ok": True,
-                "mode": self.exec_cfg.mode,
-                "timestamp": timestamp,
-                "action": raw_action,
-                "trade_direction": trade_direction,
-                "dynamic_risk_pct": dynamic_risk_pct,
-                "message": "Position already open; waiting for stop/take handling.",
-                "position_snapshot": current_snapshot,
             }
 
         if trade_direction == "HOLD":
