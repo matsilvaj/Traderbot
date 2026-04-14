@@ -10,10 +10,11 @@ from pathlib import Path
 import numpy as np
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from traderbot.config import AppConfig, MT5_TIMEFRAME_MAP, ensure_directories, load_config
+from traderbot.config import AppConfig, TIMEFRAME_MINUTES_MAP, ensure_directories, load_config
+from traderbot.data.hl_loader import HLDataLoader
 from traderbot.data.csv_loader import CSVDataLoader
 from traderbot.env.trading_env import TradingEnv
-from traderbot.execution.mt5_executor import ExecutionDecision, MT5TradeExecutor
+from traderbot.execution.hl_executor import ExecutionDecision, HyperliquidExecutor
 from traderbot.features.engineering import FeatureEngineer, default_feature_columns
 from traderbot.rl.backtest import (
     print_metrics,
@@ -80,18 +81,13 @@ def prepare_datasets(cfg: AppConfig, logger):
         logger.info("Carregando histórico a partir do CSV: %s", cfg.data.csv_path)
         raw = CSVDataLoader(cfg.data).load()
     else:
-        logger.info("Conectando ao MT5 para buscar histórico...")
-        executor = MT5TradeExecutor(
-            cfg.mt5,
-            cfg.execution,
-            stop_loss_pct=cfg.environment.stop_loss_pct,
-            take_profit_pct=cfg.environment.take_profit_pct,
-        )
-        executor.connect()
+        logger.info("Conectando à Hyperliquid para buscar histórico...")
+        loader = HLDataLoader(cfg.hyperliquid)
+        loader.connect()
         try:
-            raw = executor.fetch_historical()
+            raw = loader.fetch_historical()
         finally:
-            executor.disconnect()
+            loader.disconnect()
 
     logger.info("Histórico carregado: %s linhas", len(raw))
 
@@ -154,25 +150,8 @@ def prepare_runtime_environment_cfg(cfg: AppConfig, logger):
         env_cfg.risk_per_trade = float(cfg.execution.risk_per_trade)
 
     if env_cfg.use_broker_constraints:
-        executor = MT5TradeExecutor(
-            cfg.mt5,
-            cfg.execution,
-            stop_loss_pct=env_cfg.stop_loss_pct,
-            take_profit_pct=env_cfg.take_profit_pct,
-        )
-        executor.connect()
-        try:
-            spec = executor.get_symbol_trading_spec()
-        finally:
-            executor.disconnect()
-
-        env_cfg.broker_volume_min = spec.volume_min
-        env_cfg.broker_volume_step = spec.volume_step
-        env_cfg.broker_volume_max = spec.volume_max
-        env_cfg.broker_contract_size = spec.contract_size
-        env_cfg.broker_point = spec.point
         logger.info(
-            "Simulação realista ativada | balance=%.2f | volume_min=%.4f | step=%.4f | contract_size=%.4f | fixed_volume=%s",
+            "Simulação Hyperliquid ativada | balance=%.2f | volume_min=%.4f | step=%.4f | contract_size=%.4f | fixed_volume=%s",
             env_cfg.initial_balance,
             env_cfg.broker_volume_min,
             env_cfg.broker_volume_step,
@@ -519,7 +498,7 @@ def backtest_pipeline(cfg: AppConfig, logger, model_path: str | None):
 
 def build_live_observation(
     cfg: AppConfig,
-    executor: MT5TradeExecutor,
+    executor: HyperliquidExecutor,
     feature_cols: list[str],
     fe: FeatureEngineer,
     obs_normalizer=None,
@@ -614,7 +593,7 @@ def prepare_live_inference_context(cfg: AppConfig, logger):
 
 
 def timeframe_sleep_seconds(timeframe: str) -> int:
-    minutes = MT5_TIMEFRAME_MAP.get(str(timeframe).upper())
+    minutes = TIMEFRAME_MINUTES_MAP.get(str(timeframe).upper())
     if minutes is None:
         return 60
     return max(60, int(minutes) * 60)
@@ -660,11 +639,12 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
         model, stats_path = models
         model_entries = (model, build_obs_normalizer(stats_path))
 
-    executor = MT5TradeExecutor(
-        cfg.mt5,
+    executor = HyperliquidExecutor(
+        cfg.hyperliquid,
         cfg.execution,
         stop_loss_pct=cfg.environment.stop_loss_pct,
         take_profit_pct=cfg.environment.take_profit_pct,
+        slippage_pct=cfg.environment.slippage_pct,
     )
     executor.connect()
     logger.info("Executor conectado no modo: %s", cfg.execution.mode)
@@ -717,27 +697,25 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
                     executor.connect()
                     last_retrain = time.time()
 
-            sleep_until_next_cycle(cfg.mt5.timeframe)
+            sleep_until_next_cycle(cfg.hyperliquid.timeframe)
     finally:
         executor.disconnect()
 
 
-def check_mt5_pipeline(cfg: AppConfig, logger):
-    masked_pass = "***" if cfg.mt5.password else None
+def check_hyperliquid_pipeline(cfg: AppConfig, logger):
     logger.info(
-        "Diagnóstico MT5 | login=%s server=%s path=%s password=%s symbol=%s timeframe=%s",
-        cfg.mt5.login,
-        cfg.mt5.server,
-        cfg.mt5.path,
-        masked_pass,
-        cfg.mt5.symbol,
-        cfg.mt5.timeframe,
+        "Diagnóstico Hyperliquid | wallet=%s network=%s symbol=%s timeframe=%s",
+        cfg.hyperliquid.wallet_address,
+        cfg.hyperliquid.network,
+        cfg.hyperliquid.symbol,
+        cfg.hyperliquid.timeframe,
     )
-    executor = MT5TradeExecutor(
-        cfg.mt5,
+    executor = HyperliquidExecutor(
+        cfg.hyperliquid,
         cfg.execution,
         stop_loss_pct=cfg.environment.stop_loss_pct,
         take_profit_pct=cfg.environment.take_profit_pct,
+        slippage_pct=cfg.environment.slippage_pct,
     )
     executor.connect()
     try:
@@ -760,11 +738,11 @@ def check_mt5_pipeline(cfg: AppConfig, logger):
         status["account_risk_state"] = risk_state
     finally:
         executor.disconnect()
-    logger.info("Status MT5: %s", json.dumps(status, ensure_ascii=False))
+    logger.info("Status Hyperliquid: %s", json.dumps(status, ensure_ascii=False))
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Traderbot RL + MetaTrader 5")
+    parser = argparse.ArgumentParser(description="Traderbot RL + Hyperliquid")
     parser.add_argument("--config", type=str, default="config.yaml", help="Caminho do arquivo de configuração")
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -783,7 +761,8 @@ def parse_args():
 
     p_run = sub.add_parser("run", help="Roda loop de inferência e execução (paper/live)")
     p_run.add_argument("--model-path", type=str, default=None, help="Caminho do modelo .zip")
-    sub.add_parser("check-mt5", help="Valida conexão MT5 (login/servidor/símbolo)")
+    sub.add_parser("check-hyperliquid", help="Valida conexão Hyperliquid (wallet/rede/símbolo)")
+    sub.add_parser("check-mt5", help="Alias legado do check-hyperliquid")
 
     return parser.parse_args()
 
@@ -813,8 +792,8 @@ def main():
         backtest_pipeline(cfg, logger, args.model_path)
     elif args.command == "run":
         run_execution_pipeline(cfg, logger, args.model_path)
-    elif args.command == "check-mt5":
-        check_mt5_pipeline(cfg, logger)
+    elif args.command in {"check-hyperliquid", "check-mt5"}:
+        check_hyperliquid_pipeline(cfg, logger)
     else:
         raise ValueError("Comando inválido")
 

@@ -5,15 +5,15 @@ paths:
   results_dir: results
   logs_dir: logs
 
-mt5:
+# NOVA SEÇÃO (Substitui a seção mt5)
+hyperliquid:
   enabled: true
-  login: null
-  password: null
-  server: null
-  path: null
-  symbol: BTCUSD
-  timeframe: M5
-  history_bars: 500000
+  wallet_address: null  # Deixe null para ler do .env
+  private_key: null     # Deixe null para ler do .env
+  network: mainnet      # mainnet ou testnet
+  symbol: BTC           # Na HL o ativo é apenas BTC (e não BTCUSD)
+  timeframe: 5m         # Formato CCXT/HL
+  history_bars: 10000
 
 data:
   source: csv
@@ -31,9 +31,12 @@ environment:
   initial_balance: 10000.0
   simulation_initial_balance: 250.0
   use_fixed_trade_volume: true
-  fixed_trade_volume: 0.01
-  spread_bps: 0.0
-  slippage_bps: 0.5
+  fixed_trade_volume: 0.001
+
+  # NOVAS TAXAS (Substituem spread_bps e slippage_bps)
+  taker_fee_pct: 0.00045   # 0.045% - Taxa Base Taker da HL (Tier 0)
+  maker_fee_pct: 0.00015   # 0.015% - Taxa Base Maker da HL (Tier 0)
+  slippage_pct: 0.00010    # 0.01% - Estimativa de escorregamento da ordem a mercado
   stop_loss_pct: 0.005
   take_profit_pct: 0.01
   reward_clip_limit: 5.0
@@ -48,11 +51,13 @@ environment:
   flat_steps_threshold: 50
   flat_inactivity_penalty: 0.0
   use_broker_constraints: true
-  broker_volume_min: 0.01
-  broker_volume_step: 0.01
+
+  # VALORES ATUALIZADOS PARA HYPERLIQUID (BTC)
+  broker_volume_min: 0.0001
+  broker_volume_step: 0.0001
   broker_volume_max: 22.0
   broker_contract_size: 1.0
-  broker_point: 0.01
+  broker_point: 1.0
   risk_per_trade: 0.012
   block_trade_on_excess_risk: false
   max_episode_steps: null

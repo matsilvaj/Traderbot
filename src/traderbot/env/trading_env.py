@@ -111,8 +111,9 @@ class TradingEnv(gym.Env):
         return 1.0
 
     def _estimate_cost(self, price: float, units: float = 1.0) -> float:
-        bps = self.cfg.spread_bps + self.cfg.slippage_bps
-        return price * (bps / 10_000.0) * units
+        notional_value = price * units
+        total_fee_rate = float(self.cfg.taker_fee_pct) + float(self.cfg.slippage_pct)
+        return notional_value * total_fee_rate
 
     def _unrealized_pnl(self, price: float) -> float:
         if self.position == 0:

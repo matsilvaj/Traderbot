@@ -10,6 +10,8 @@ torch>=2.2.0
 # Trading / integração
 MetaTrader5>=5.0.45
 ccxt>=4.4.0
+eth_account
+git+https://github.com/hyperliquid-dex/hyperliquid-python-sdk.git
 
 # Config e utilidades
 PyYAML>=6.0.1

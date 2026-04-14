@@ -17,21 +17,20 @@ class PathsConfig:
 
 
 @dataclass
-class MT5Config:
+class HyperliquidConfig:
     enabled: bool = True
-    login: Optional[int] = None
-    password: Optional[str] = None
-    server: Optional[str] = None
-    path: Optional[str] = None
-    symbol: str = "BTCUSD"
-    timeframe: str = "M5"
-    history_bars: int = 500_000
+    wallet_address: Optional[str] = None
+    private_key: Optional[str] = None
+    network: str = "mainnet"
+    symbol: str = "BTC"
+    timeframe: str = "1m"
+    history_bars: int = 10_000
 
 
 @dataclass
 class DataConfig:
     source: str = "csv"
-    csv_path: Optional[str] = "data/binance_btcusdt_m5.csv"
+    csv_path: Optional[str] = "data/binance_btcusdt_m1.csv"
     timestamp_column: str = "timestamp"
 
 
@@ -49,9 +48,10 @@ class EnvironmentConfig:
     initial_balance: float = 10_000.0
     simulation_initial_balance: Optional[float] = None
     use_fixed_trade_volume: bool = False
-    fixed_trade_volume: float = 0.01
-    spread_bps: float = 0.0
-    slippage_bps: float = 0.5
+    fixed_trade_volume: float = 0.001
+    taker_fee_pct: float = 0.00045
+    maker_fee_pct: float = 0.00015
+    slippage_pct: float = 0.00010
     stop_loss_pct: float = 0.005
     take_profit_pct: float = 0.01
     reward_clip_limit: float = 5.0
@@ -66,11 +66,11 @@ class EnvironmentConfig:
     flat_steps_threshold: int = 50
     flat_inactivity_penalty: float = 0.0
     use_broker_constraints: bool = False
-    broker_volume_min: float = 0.0
-    broker_volume_step: float = 0.0
+    broker_volume_min: float = 0.0001
+    broker_volume_step: float = 0.0001
     broker_volume_max: float = 0.0
     broker_contract_size: float = 1.0
-    broker_point: float = 0.01
+    broker_point: float = 1.0
     risk_per_trade: float = 0.01
     block_trade_on_excess_risk: bool = True
     max_episode_steps: Optional[int] = None
@@ -139,7 +139,7 @@ class RetrainingConfig:
 class AppConfig:
     app_name: str = "traderbot-rl"
     paths: PathsConfig = field(default_factory=PathsConfig)
-    mt5: MT5Config = field(default_factory=MT5Config)
+    hyperliquid: HyperliquidConfig = field(default_factory=HyperliquidConfig)
     data: DataConfig = field(default_factory=DataConfig)
     features: FeatureConfig = field(default_factory=FeatureConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
@@ -149,7 +149,16 @@ class AppConfig:
     retraining: RetrainingConfig = field(default_factory=RetrainingConfig)
 
 
-MT5_TIMEFRAME_MAP: dict[str, int] = {
+TIMEFRAME_MINUTES_MAP: dict[str, int] = {
+    "1M": 1,
+    "2M": 2,
+    "3M": 3,
+    "4M": 4,
+    "5M": 5,
+    "10M": 10,
+    "15M": 15,
+    "30M": 30,
+    "1H": 60,
     "M1": 1,
     "M2": 2,
     "M3": 3,
@@ -175,7 +184,7 @@ def _build_config(raw: dict[str, Any]) -> AppConfig:
     return AppConfig(
         app_name=raw.get("app_name", "traderbot-rl"),
         paths=PathsConfig(**raw.get("paths", {})),
-        mt5=MT5Config(**raw.get("mt5", {})),
+        hyperliquid=HyperliquidConfig(**raw.get("hyperliquid", {})),
         data=DataConfig(**raw.get("data", {})),
         features=FeatureConfig(**raw.get("features", {})),
         environment=EnvironmentConfig(**raw.get("environment", {})),
@@ -215,21 +224,13 @@ def load_config(config_path: str | Path = "config.yaml") -> AppConfig:
         value = value.strip().strip("\"'").strip()
         return value or None
 
-    login_env = _clean_env("MT5_LOGIN")
-    if login_env is not None:
-        cfg.mt5.login = int(login_env)
+    wallet_env = _clean_env("HL_WALLET_ADDRESS")
+    if wallet_env is not None:
+        cfg.hyperliquid.wallet_address = wallet_env
 
-    password_env = _clean_env("MT5_PASSWORD")
-    if password_env is not None:
-        cfg.mt5.password = password_env
-
-    server_env = _clean_env("MT5_SERVER")
-    if server_env is not None:
-        cfg.mt5.server = server_env
-
-    path_env = _clean_env("MT5_PATH")
-    if path_env is not None:
-        cfg.mt5.path = path_env
+    pk_env = _clean_env("HL_PRIVATE_KEY")
+    if pk_env is not None:
+        cfg.hyperliquid.private_key = pk_env
 
     return cfg
 
