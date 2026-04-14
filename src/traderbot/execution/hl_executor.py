@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from math import floor
 from typing import Optional
 
+import pandas as pd
+
 from traderbot.config import EnvironmentConfig, ExecutionConfig, HyperliquidConfig, TIMEFRAME_MINUTES_MAP
 from traderbot.data.hl_loader import HLDataLoader
 
@@ -27,6 +29,7 @@ except ImportError:  # pragma: no cover
 class ExecutionDecision:
     action: float
     reason: str = ""
+    entry_distance_from_ema_240: float = 0.0
 
 
 @dataclass
@@ -75,8 +78,12 @@ class HyperliquidExecutor:
         self.paper_entry_price = 0.0
         self.paper_volume = 0.0
         self.paper_balance = float(self.env_cfg.initial_balance)
+        self.session_peak_balance = float(self.env_cfg.initial_balance)
         self.paper_entry_opened_at: Optional[float] = None
+        self.paper_entry_distance_from_ema_240 = 0.0
         self.live_entry_opened_at: Optional[float] = None
+        self.live_entry_distance_from_ema_240 = 0.0
+        self.market_cache: Optional[pd.DataFrame] = None
 
     def _base_url(self) -> str:
         network = str(self.hl_cfg.network).lower().strip()
@@ -111,11 +118,15 @@ class HyperliquidExecutor:
         self.loader.connect()
         self.info = self.loader.info
         self.paper_balance = float(self.env_cfg.initial_balance)
+        self.session_peak_balance = float(self.env_cfg.initial_balance)
         self.paper_position = 0
         self.paper_entry_price = 0.0
         self.paper_volume = 0.0
         self.paper_entry_opened_at = None
+        self.paper_entry_distance_from_ema_240 = 0.0
         self.live_entry_opened_at = None
+        self.live_entry_distance_from_ema_240 = 0.0
+        self.market_cache = None
 
         wallet_address = self._clean_secret(self.hl_cfg.wallet_address)
         private_key = self._clean_secret(self.hl_cfg.private_key)
@@ -142,9 +153,20 @@ class HyperliquidExecutor:
         self.exchange = None
         self.account = None
         self.address = None
+        self.market_cache = None
 
-    def fetch_historical(self, end_time: Optional[datetime] = None):
-        return self.loader.fetch_historical(end_time=end_time)
+    def fetch_historical(self, end_time: Optional[datetime] = None, bars: Optional[int] = None):
+        return self.loader.fetch_historical(end_time=end_time, bars=bars)
+
+    def get_live_market_window(self) -> pd.DataFrame:
+        target_bars = max(int(self.hl_cfg.live_window_bars), 1)
+        if self.market_cache is None or self.market_cache.empty:
+            self.market_cache = self.fetch_historical(bars=target_bars)
+        else:
+            self.market_cache = self.loader.update_dataframe(self.market_cache)
+        if len(self.market_cache) > target_bars:
+            self.market_cache = self.market_cache.tail(target_bars).copy()
+        return self.market_cache.copy()
 
     def _get_mid_price(self) -> float:
         info = self._ensure_info()
@@ -191,11 +213,18 @@ class HyperliquidExecutor:
 
     def get_account_risk_state(self) -> dict:
         balance = self.get_account_balance()
+        self.session_peak_balance = max(float(self.session_peak_balance), float(balance))
+        drawdown_pct = (
+            (float(balance) - float(self.session_peak_balance)) / max(float(self.session_peak_balance), 1e-12)
+        )
+        defensive_threshold = abs(float(self.exec_cfg.defensive_drawdown_pct))
+        defensive_enabled = defensive_threshold > 0 and float(self.exec_cfg.defensive_risk_multiplier) < 1.0
+        defensive = defensive_enabled and drawdown_pct <= -defensive_threshold
         return {
             "balance": balance,
             "equity": balance,
-            "drawdown_pct": 0.0,
-            "defensive": False,
+            "drawdown_pct": drawdown_pct,
+            "defensive": defensive,
         }
 
     def _round_volume_to_step(self, volume: float, volume_min: float, volume_step: float) -> float:
@@ -298,9 +327,10 @@ class HyperliquidExecutor:
         return max(-1.0, min(1.0, raw_action))
 
     def _action_direction(self, raw_action: float) -> str:
-        if raw_action > 0.1:
+        threshold = float(self.env_cfg.action_hold_threshold)
+        if raw_action > threshold:
             return "BUY"
-        if raw_action < -0.1:
+        if raw_action < -threshold:
             return "SELL"
         return "HOLD"
 
@@ -333,6 +363,7 @@ class HyperliquidExecutor:
         self.paper_entry_price = 0.0
         self.paper_volume = 0.0
         self.paper_entry_opened_at = None
+        self.paper_entry_distance_from_ema_240 = 0.0
         return snapshot
 
     def _paper_check_stop_take(self) -> dict | None:
@@ -369,6 +400,7 @@ class HyperliquidExecutor:
                 "avg_entry_price": self.paper_entry_price,
                 "unrealized_pnl": unrealized_pnl,
                 "time_in_position": self._position_bars(self.paper_entry_opened_at),
+                "entry_distance_from_ema_240": float(self.paper_entry_distance_from_ema_240),
             }
 
         if not self.address:
@@ -378,6 +410,8 @@ class HyperliquidExecutor:
                 "volume": 0.0,
                 "avg_entry_price": 0.0,
                 "unrealized_pnl": 0.0,
+                "time_in_position": 0.0,
+                "entry_distance_from_ema_240": 0.0,
             }
 
         user_state = self._ensure_info().user_state(self.address)
@@ -399,9 +433,11 @@ class HyperliquidExecutor:
                 "avg_entry_price": float(entry_px) if entry_px is not None else 0.0,
                 "unrealized_pnl": float(position.get("unrealizedPnl", 0.0)),
                 "time_in_position": self._position_bars(self.live_entry_opened_at),
+                "entry_distance_from_ema_240": float(self.live_entry_distance_from_ema_240),
             }
 
         self.live_entry_opened_at = None
+        self.live_entry_distance_from_ema_240 = 0.0
         return {
             "symbol": symbol,
             "side": 0,
@@ -409,6 +445,7 @@ class HyperliquidExecutor:
             "avg_entry_price": 0.0,
             "unrealized_pnl": 0.0,
             "time_in_position": 0.0,
+            "entry_distance_from_ema_240": 0.0,
         }
 
     def _response_ok(self, response) -> bool:
@@ -447,6 +484,7 @@ class HyperliquidExecutor:
         self.last_order_ts = time.time()
         if self._response_ok(response):
             self.live_entry_opened_at = None
+            self.live_entry_distance_from_ema_240 = 0.0
         return {
             "ok": self._response_ok(response),
             "mode": self.exec_cfg.mode,
@@ -466,8 +504,8 @@ class HyperliquidExecutor:
         if self.exec_cfg.mode.lower() == "paper":
             stop_take_event = self._paper_check_stop_take()
             sizing = None
-            paper_volume = float(self.env_cfg.fixed_trade_volume)
-            if not self.env_cfg.use_fixed_trade_volume and trade_direction != "HOLD":
+            paper_volume = 0.0
+            if trade_direction != "HOLD":
                 sizing = self.calculate_order_volume(
                     balance=float(self.paper_balance),
                     dynamic_risk_pct=dynamic_risk_pct,
@@ -483,8 +521,10 @@ class HyperliquidExecutor:
                 self.paper_entry_price = self._get_mid_price()
                 self.paper_volume = paper_volume
                 self.paper_entry_opened_at = time.time()
+                self.paper_entry_distance_from_ema_240 = float(decision.entry_distance_from_ema_240)
                 entry_cost = self._estimate_cost(self.paper_entry_price, self.paper_volume)
                 self.paper_balance -= entry_cost
+                self.session_peak_balance = max(float(self.session_peak_balance), float(self.paper_balance))
                 opened = True
                 open_price = self.paper_entry_price
 
@@ -569,24 +609,13 @@ class HyperliquidExecutor:
 
         risk_state = self.get_account_risk_state()
         price = self._get_mid_price()
-        if self.env_cfg.use_fixed_trade_volume:
-            spec = self.get_symbol_trading_spec()
-            volume = self._round_volume_to_step(
-                float(self.env_cfg.fixed_trade_volume),
-                spec.volume_min,
-                spec.volume_step,
-            )
-            if spec.volume_max > 0:
-                volume = min(volume, spec.volume_max)
-            sizing = None
-        else:
-            sizing = self.calculate_order_volume(
-                balance=risk_state["balance"],
-                dynamic_risk_pct=dynamic_risk_pct,
-                price=price,
-                defensive=bool(risk_state["defensive"]),
-            )
-            volume = float(sizing["adjusted_volume"])
+        sizing = self.calculate_order_volume(
+            balance=risk_state["balance"],
+            dynamic_risk_pct=dynamic_risk_pct,
+            price=price,
+            defensive=bool(risk_state["defensive"]),
+        )
+        volume = float(sizing["adjusted_volume"])
 
         if volume <= 0:
             return {
@@ -611,6 +640,7 @@ class HyperliquidExecutor:
         self.last_order_ts = time.time()
         if self._response_ok(response):
             self.live_entry_opened_at = time.time()
+            self.live_entry_distance_from_ema_240 = float(decision.entry_distance_from_ema_240)
 
         return {
             "ok": self._response_ok(response),

@@ -112,12 +112,12 @@ class HLDataLoader:
             )
         return out.set_index("time")
 
-    def fetch_historical(self, end_time: Optional[datetime] = None) -> pd.DataFrame:
+    def fetch_historical(self, end_time: Optional[datetime] = None, bars: Optional[int] = None) -> pd.DataFrame:
         info = self._ensure_info()
         end_time = end_time or datetime.now(timezone.utc)
         end_ms = int(end_time.timestamp() * 1000)
         interval_ms = self._timeframe_minutes() * 60_000
-        bars = max(int(self.cfg.history_bars), 1)
+        bars = max(int(self.cfg.history_bars if bars is None else bars), 1)
         start_ms = end_ms - (bars * interval_ms)
         candles = info.candles_snapshot(
             str(self.cfg.symbol),

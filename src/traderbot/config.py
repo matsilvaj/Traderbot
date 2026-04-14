@@ -23,14 +23,15 @@ class HyperliquidConfig:
     private_key: Optional[str] = None
     network: str = "mainnet"
     symbol: str = "BTC"
-    timeframe: str = "1m"
+    timeframe: str = "5m"
     history_bars: int = 10_000
+    live_window_bars: int = 2_000
 
 
 @dataclass
 class DataConfig:
     source: str = "csv"
-    csv_path: Optional[str] = "data/binance_btcusdt_m1.csv"
+    csv_path: Optional[str] = "data/binance_btcusdt_m5.csv"
     timestamp_column: str = "timestamp"
 
 
@@ -47,34 +48,26 @@ class FeatureConfig:
 class EnvironmentConfig:
     initial_balance: float = 250.0
     simulation_initial_balance: Optional[float] = None
-    use_fixed_trade_volume: bool = False
-    fixed_trade_volume: float = 0.001
-    max_risk_per_trade: float = 0.05
+    max_risk_per_trade: float = 0.02
     min_risk_per_trade: float = 0.001
+    action_hold_threshold: float = 0.30
     taker_fee_pct: float = 0.00045
-    maker_fee_pct: float = 0.00015
     slippage_pct: float = 0.00010
     stop_loss_pct: float = 0.005
     take_profit_pct: float = 0.01
     reward_clip_limit: float = 5.0
     pain_decay_factor: float = 0.01
     overtrade_penalty: float = 0.002
-    loss_penalty_factor: float = 0.0
-    quality_bonus_factor: float = 0.1
-    unrealized_delta_reward_factor: float = 0.0
-    unrealized_level_reward_factor: float = 0.0
-    active_position_bonus: float = 0.0
-    flat_position_penalty: float = 0.0
-    flat_steps_threshold: int = 50
-    flat_inactivity_penalty: float = 0.0
+    blocked_trade_penalty: float = 0.001
+    close_profit_bonus: float = 0.02
+    close_loss_penalty: float = 0.02
     broker_min_notional_usd: float = 10.0
     use_broker_constraints: bool = True
     broker_volume_min: float = 0.0001
     broker_volume_step: float = 0.0001
-    broker_volume_max: float = 0.0
+    broker_volume_max: float = 22.0
     broker_contract_size: float = 1.0
     broker_point: float = 1.0
-    risk_per_trade: float = 0.01
     block_trade_on_excess_risk: bool = False
     max_episode_steps: Optional[int] = None
     trade_cooldown_steps: int = 12
@@ -116,18 +109,13 @@ class TrainingConfig:
 @dataclass
 class ExecutionConfig:
     mode: str = "paper"
-    lot: float = 0.01
-    use_dynamic_position_sizing: bool = True
-    risk_per_trade: float = 0.01
     defensive_drawdown_pct: float = 0.02
     defensive_risk_multiplier: float = 0.5
-    validation_balance: float = 50.0
+    validation_balance: float = 250.0
     ensemble_enabled: bool = True
     ensemble_model_names: list[str] = field(
         default_factory=lambda: ["ppo_btc_m5_s123", "ppo_btc_m5_s512", "ppo_btc_m5_s2004"]
     )
-    deviation: int = 20
-    magic: int = 20260407
     allow_live_trading: bool = False
     min_seconds_between_orders: int = 10
 

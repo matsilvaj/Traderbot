@@ -95,11 +95,11 @@ def _coerce_action_array(action) -> Any:
     return np.asarray(action, dtype=np.float32).reshape(1)
 
 
-def _action_bucket(action) -> int:
+def _action_bucket(action, hold_threshold: float) -> int:
     raw_action = float(np.asarray(action, dtype=np.float32).reshape(-1)[0])
-    if raw_action > 0.1:
+    if raw_action > hold_threshold:
         return 1
-    if raw_action < -0.1:
+    if raw_action < -hold_threshold:
         return -1
     return 0
 
@@ -169,6 +169,7 @@ def run_backtest_ensemble(
     obs, _ = env.reset()
     total_steps = max(1, len(df) - 1)
     start_time = time.time()
+    hold_threshold = float(env_cfg.action_hold_threshold)
 
     vote_totals = {-1: 0, 0: 0, 1: 0}
     tie_steps = 0
@@ -183,14 +184,14 @@ def run_backtest_ensemble(
             )
             for model, obs_normalizer in model_entries
         ]
-        buckets = [_action_bucket(action) for action in raw_actions]
+        buckets = [_action_bucket(action, hold_threshold) for action in raw_actions]
         counts = {bucket: buckets.count(bucket) for bucket in (-1, 0, 1)}
         for bucket, count in counts.items():
             vote_totals[bucket] += count
 
         mean_action = float(np.mean(raw_actions))
         action = np.array([mean_action], dtype=np.float32)
-        if counts[-1] > 0 and counts[1] > 0 and _action_bucket(action) == 0:
+        if counts[-1] > 0 and counts[1] > 0 and _action_bucket(action, hold_threshold) == 0:
             tie_steps += 1
 
         obs, _, terminated, truncated, _ = env.step(action)

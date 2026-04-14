@@ -13,7 +13,8 @@ hyperliquid:
   network: mainnet      # mainnet ou testnet
   symbol: BTC           # Na HL o ativo é apenas BTC (e não BTCUSD)
   timeframe: 5m         # Formato CCXT/HL
-  history_bars: 500000
+  history_bars: 10000
+  live_window_bars: 2000
 
 data:
   source: csv
@@ -30,28 +31,21 @@ features:
 environment:
   initial_balance: 250.0
   simulation_initial_balance: 250.0
-  use_fixed_trade_volume: false
-  fixed_trade_volume: 0.001
-  max_risk_per_trade: 0.05
+  max_risk_per_trade: 0.02
   min_risk_per_trade: 0.001
+  action_hold_threshold: 0.30
 
   # NOVAS TAXAS (Substituem spread_bps e slippage_bps)
   taker_fee_pct: 0.00045   # 0.045% - Taxa Base Taker da HL (Tier 0)
-  maker_fee_pct: 0.00015   # 0.015% - Taxa Base Maker da HL (Tier 0)
   slippage_pct: 0.00010    # 0.01% - Estimativa de escorregamento da ordem a mercado
   stop_loss_pct: 0.005
   take_profit_pct: 0.01
   reward_clip_limit: 5.0
   pain_decay_factor: 0.01
   overtrade_penalty: 0.002
-  loss_penalty_factor: 0.0
-  quality_bonus_factor: 0.1
-  unrealized_delta_reward_factor: 0.0
-  unrealized_level_reward_factor: 0.0
-  active_position_bonus: 0.0
-  flat_position_penalty: 0.0
-  flat_steps_threshold: 50
-  flat_inactivity_penalty: 0.0
+  blocked_trade_penalty: 0.001
+  close_profit_bonus: 0.02
+  close_loss_penalty: 0.02
   broker_min_notional_usd: 10.0
   use_broker_constraints: true
 
@@ -61,7 +55,6 @@ environment:
   broker_volume_max: 22.0
   broker_contract_size: 1.0
   broker_point: 1.0
-  risk_per_trade: 0.012
   block_trade_on_excess_risk: false
   max_episode_steps: null
   trade_cooldown_steps: 12
@@ -100,9 +93,6 @@ training:
 
 execution:
   mode: paper
-  lot: 0.01
-  use_dynamic_position_sizing: false
-  risk_per_trade: 0.012
   defensive_drawdown_pct: 0.02
   defensive_risk_multiplier: 0.5
   validation_balance: 250.0
@@ -111,8 +101,6 @@ execution:
     - ppo_btc_m5_s123
     - ppo_btc_m5_s512
     - ppo_btc_m5_s2004
-  deviation: 20
-  magic: 20260407
   allow_live_trading: false
   min_seconds_between_orders: 10
 

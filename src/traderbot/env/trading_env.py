@@ -19,13 +19,26 @@ class TradeEvent:
     pnl: float
 
 
+@dataclass
+class ActionExecution:
+    requested_direction: str
+    executed_direction: str
+    realized_pnl: float = 0.0
+    position_changes: int = 0
+    agent_order_executed: bool = False
+    executed_entry: bool = False
+    agent_close_executed: bool = False
+    blocked: bool = False
+    blocked_reason: Optional[str] = None
+
+
 class TradingEnv(gym.Env):
     """Ambiente de trading para scalping BTC.
 
     Ações:
         Valor contínuo em [-1, 1]
-        > 0.1: BUY
-        < -0.1: SELL
+        > threshold: BUY
+        < -threshold: SELL
         caso contrário: HOLD
     """
 
@@ -61,7 +74,6 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
 
         self.current_step = 0
-        self.last_equity = self.cfg.initial_balance
         self.balance = self.cfg.initial_balance
         self.equity = self.cfg.initial_balance
 
@@ -74,15 +86,15 @@ class TradingEnv(gym.Env):
         self.trade_count = 0
         self.win_count = 0
         self.blocked_trade_count = 0
+        self.agent_order_count = 0
         self.equity_curve: list[float] = []
         self.cooldown_steps_remaining = 0
         self.margin_call_triggered = False
-        self.last_closed_trade_cost = 0.0
+        self.blocked_trade_reason_counts = self._empty_blocked_reason_counts()
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None):
         super().reset(seed=seed)
         self.current_step = 0
-        self.last_equity = self.cfg.initial_balance
         self.balance = self.cfg.initial_balance
         self.equity = self.cfg.initial_balance
 
@@ -95,12 +107,34 @@ class TradingEnv(gym.Env):
         self.trade_count = 0
         self.win_count = 0
         self.blocked_trade_count = 0
+        self.agent_order_count = 0
         self.equity_curve = [self.equity]
         self.cooldown_steps_remaining = 0
         self.margin_call_triggered = False
-        self.last_closed_trade_cost = 0.0
+        self.blocked_trade_reason_counts = self._empty_blocked_reason_counts()
 
         return self._get_obs(), {}
+
+    @staticmethod
+    def _empty_blocked_reason_counts() -> dict[str, int]:
+        return {
+            "cooldown": 0,
+            "min_notional": 0,
+            "volume_min": 0,
+            "invalid_stop_distance": 0,
+        }
+
+    def _register_blocked_trade(self, reason: str) -> None:
+        self.blocked_trade_count += 1
+        self.blocked_trade_reason_counts[reason] = self.blocked_trade_reason_counts.get(reason, 0) + 1
+
+    def _action_direction(self, raw_action: float) -> str:
+        threshold = float(self.cfg.action_hold_threshold)
+        if raw_action > threshold:
+            return "BUY"
+        if raw_action < -threshold:
+            return "SELL"
+        return "HOLD"
 
     def _price(self, idx: int) -> float:
         safe_idx = min(max(int(idx), 0), len(self.price_array) - 1)
@@ -130,25 +164,21 @@ class TradingEnv(gym.Env):
         rounded = np.floor(volume / step) * step
         return max(float(rounded), volume_min)
 
-    def _calculate_trade_volume(self, price: float, dynamic_risk_pct: float) -> tuple[float, bool]:
-        if self.cfg.use_fixed_trade_volume:
-            volume = float(self.cfg.fixed_trade_volume)
-            if self.cfg.use_broker_constraints:
-                volume = self._round_volume_to_step(volume)
-            return float(volume), False
-
-        if not self.cfg.use_broker_constraints:
-            return 1.0, False
-
+    def _calculate_trade_volume(self, price: float, dynamic_risk_pct: float) -> tuple[float, bool, Optional[str]]:
         # Cálculo do risco financeiro baseado na IA
         balance = float(self.balance)
         risk_amount = balance * dynamic_risk_pct
 
         # Distância financeira do stop
         stop_distance_price = price * float(self.cfg.stop_loss_pct)
+        if stop_distance_price <= 0:
+            return 0.0, True, "invalid_stop_distance"
 
         # Tamanho em BTC
-        raw_volume = 0.0 if stop_distance_price <= 0 else (risk_amount / stop_distance_price)
+        raw_volume = risk_amount / stop_distance_price if risk_amount > 0 else 0.0
+        if not self.cfg.use_broker_constraints:
+            return float(max(raw_volume, 0.0)), False, None
+
         volume = self._round_volume_to_step(raw_volume)
 
         # Restrição Hyperliquid: Notional Mínimo ($10)
@@ -157,9 +187,8 @@ class TradingEnv(gym.Env):
 
         if notional_value < min_notional_usd:
             if getattr(self.cfg, "block_trade_on_excess_risk", False):
-                return 0.0, True
-            else:
-                volume = self._round_volume_to_step(min_notional_usd / price)
+                return 0.0, True, "min_notional"
+            volume = self._round_volume_to_step(min_notional_usd / price)
 
         # Restrição de volume máximo
         if float(self.cfg.broker_volume_max) > 0:
@@ -167,9 +196,9 @@ class TradingEnv(gym.Env):
 
         # Restrição final de step
         if volume < float(self.cfg.broker_volume_min):
-            return 0.0, True
+            return 0.0, True, "volume_min"
 
-        return float(volume), False
+        return float(volume), False, None
 
     def _close_position(self, price: float) -> float:
         if self.position == 0:
@@ -180,7 +209,6 @@ class TradingEnv(gym.Env):
         pnl = (price - self.entry_price) * self.position * units - cost
         self.balance += pnl
         side = "LONG" if self.position == 1 else "SHORT"
-        self.last_closed_trade_cost = cost
 
         self.trades.append(
             TradeEvent(
@@ -202,18 +230,23 @@ class TradingEnv(gym.Env):
         self.cooldown_steps_remaining = max(0, int(self.cfg.trade_cooldown_steps))
         return pnl
 
-    def _open_position(self, target_position: int, price: float, dynamic_risk_pct: float) -> tuple[float, bool]:
+    def _open_position(
+        self,
+        target_position: int,
+        price: float,
+        dynamic_risk_pct: float,
+    ) -> tuple[float, bool, Optional[str]]:
         if target_position == 0:
-            return 0.0, False
+            return 0.0, False, None
 
         if self.cooldown_steps_remaining > 0:
-            self.blocked_trade_count += 1
-            return 0.0, False
+            self._register_blocked_trade("cooldown")
+            return 0.0, False, "cooldown"
 
-        volume, blocked = self._calculate_trade_volume(price, dynamic_risk_pct)
+        volume, blocked, blocked_reason = self._calculate_trade_volume(price, dynamic_risk_pct)
         if blocked or volume <= 0:
-            self.blocked_trade_count += 1
-            return 0.0, False
+            self._register_blocked_trade(blocked_reason or "volume_min")
+            return 0.0, False, blocked_reason or "volume_min"
 
         units = self._trade_units(volume=volume)
         cost = self._estimate_cost(price, units=units)
@@ -226,29 +259,39 @@ class TradingEnv(gym.Env):
             self.entry_distance_from_ema_240 = float(self.df.loc[self.current_step, "dist_ema_240"])
         else:
             self.entry_distance_from_ema_240 = 0.0
-        return -cost, True
+        return -cost, True, None
 
-    def _apply_action(self, trade_direction: str, price: float, dynamic_risk_pct: float) -> tuple[float, int]:
+    def _apply_action(self, trade_direction: str, price: float, dynamic_risk_pct: float) -> ActionExecution:
         # mapeamento de ação para posição alvo
         target_position = {"HOLD": self.position, "BUY": 1, "SELL": -1}[trade_direction]
-
-        realized_pnl = 0.0
-        position_changes = 0
+        executed_direction = "BUY" if self.position == 1 else "SELL" if self.position == -1 else "HOLD"
+        result = ActionExecution(
+            requested_direction=trade_direction,
+            executed_direction=executed_direction,
+        )
 
         if target_position != self.position:
             # Fecha posição existente se necessário
             if self.position != 0:
-                realized_pnl += self._close_position(price)
-                position_changes += 1
+                result.realized_pnl += self._close_position(price)
+                result.position_changes += 1
+                result.agent_close_executed = True
+                result.agent_order_executed = True
 
             # Abre nova posição
             if target_position != 0:
-                open_pnl, opened = self._open_position(target_position, price, dynamic_risk_pct)
-                realized_pnl += open_pnl
+                open_pnl, opened, blocked_reason = self._open_position(target_position, price, dynamic_risk_pct)
+                result.realized_pnl += open_pnl
                 if opened:
-                    position_changes += 1
+                    result.position_changes += 1
+                    result.executed_entry = True
+                    result.agent_order_executed = True
+                elif blocked_reason is not None:
+                    result.blocked = True
+                    result.blocked_reason = blocked_reason
 
-        return realized_pnl, position_changes
+        result.executed_direction = "BUY" if self.position == 1 else "SELL" if self.position == -1 else "HOLD"
+        return result
 
     def _check_stop_take(self, price: float) -> tuple[float, int]:
         """Aplica stop-loss/take-profit com base no preço atual."""
@@ -290,18 +333,14 @@ class TradingEnv(gym.Env):
         return np.concatenate([row, extras], axis=0)
 
     def step(self, action):
+        prev_trade_count = self.trade_count
         action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
         raw_action = float(action_arr[0])
         raw_action = float(np.clip(raw_action, -1.0, 1.0))
-        previous_balance = float(self.balance)
+        previous_equity = float(self.equity)
 
         # Define a direção
-        if raw_action > 0.1:
-            trade_direction = "BUY"
-        elif raw_action < -0.1:
-            trade_direction = "SELL"
-        else:
-            trade_direction = "HOLD"
+        trade_direction = self._action_direction(raw_action)
 
         # Calcula o Risco Dinâmico (%)
         action_magnitude = abs(raw_action)
@@ -313,9 +352,10 @@ class TradingEnv(gym.Env):
         current_price = self._price(self.current_step)
         starting_cooldown = self.cooldown_steps_remaining
         realized_pnl, position_changes = self._check_stop_take(current_price)
-        action_pnl, action_changes = self._apply_action(trade_direction, current_price, dynamic_risk_pct)
-        realized_pnl += action_pnl
-        position_changes += action_changes
+        action_result = self._apply_action(trade_direction, current_price, dynamic_risk_pct)
+        realized_pnl += action_result.realized_pnl
+        position_changes += action_result.position_changes
+        self.agent_order_count += int(action_result.agent_close_executed) + int(action_result.executed_entry)
 
         unrealized = self._unrealized_pnl(current_price)
         self.equity = self.balance + unrealized
@@ -348,30 +388,31 @@ class TradingEnv(gym.Env):
             unrealized = 0.0
             self.equity = self.balance
 
-        step_pnl = float(self.balance) - previous_balance
-        pct_return = step_pnl / max(previous_balance, 1e-12)
+        step_pnl = float(self.equity) - previous_equity
+        pct_return = step_pnl / max(previous_equity, 1e-12)
         base_reward = pct_return * 100.0
 
-        risk_penalty = 0.0
-        if trade_direction != "HOLD":
-            if step_pnl <= 0:
-                risk_penalty = action_magnitude * 0.1
-            else:
-                assumed_risk = max(action_magnitude * float(self.cfg.max_risk_per_trade), 1e-12)
-                if (pct_return / assumed_risk) < 0.5:
-                    risk_penalty = action_magnitude * 0.05
-
-        reward = base_reward - risk_penalty
-        reward -= float(self.cfg.overtrade_penalty if trade_direction != "HOLD" else 0.0)
+        reward = base_reward
+        if action_result.agent_order_executed:
+            reward -= float(self.cfg.overtrade_penalty)
+        if action_result.blocked:
+            reward -= float(self.cfg.blocked_trade_penalty)
 
         pain_penalty = float(
             np.clip(
-                min(0.0, unrealized) * float(self.cfg.pain_decay_factor),
+                min(0.0, unrealized / max(previous_equity, 1e-12)) * 100.0 * float(self.cfg.pain_decay_factor),
                 -float(self.cfg.reward_clip_limit),
                 0.0,
             )
         )
         reward += pain_penalty
+
+        if self.trade_count > prev_trade_count and self.trades:
+            last_trade = self.trades[-1]
+            if last_trade.pnl > 0:
+                reward += float(self.cfg.close_profit_bonus)
+            elif last_trade.pnl < 0:
+                reward -= float(self.cfg.close_loss_penalty)
 
         if margin_call_penalty_applied > 0.0:
             reward -= margin_call_penalty_applied
@@ -384,31 +425,54 @@ class TradingEnv(gym.Env):
             )
         )
 
-        self.last_equity = self.equity
         self.equity_curve.append(self.equity)
 
         obs = self._get_obs() if not terminated else np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        info = self._get_info_dict(realized_pnl, margin_call_penalty_applied)
+        info = self._get_info_dict(
+            realized_pnl,
+            margin_call_penalty_applied,
+            action_result,
+            reward,
+            step_pnl,
+        )
         if terminated:
             info["final_metrics"] = self.get_metrics()
 
         return obs, float(reward), terminated, False, info
 
-    def _get_info_dict(self, realized_pnl_step: float, margin_call_penalty_applied: float = 0.0) -> dict:
+    def _get_info_dict(
+        self,
+        realized_pnl_step: float,
+        margin_call_penalty_applied: float = 0.0,
+        action_result: Optional[ActionExecution] = None,
+        reward_step: float = 0.0,
+        equity_delta_step: float = 0.0,
+    ) -> dict:
         """Função auxiliar para limpar o dict de info"""
         info = {
             "equity": self.equity,
             "balance": self.balance,
             "position": self.position,
             "trade_count": self.trade_count,
+            "agent_order_count": self.agent_order_count,
             "blocked_trade_count": self.blocked_trade_count,
             "win_count": self.win_count,
             "realized_pnl_step": float(realized_pnl_step),
+            "equity_delta_step": float(equity_delta_step),
+            "reward_step": float(reward_step),
             "cooldown_steps_remaining": int(self.cooldown_steps_remaining),
             "margin_call_triggered": bool(self.margin_call_triggered),
             "margin_call_penalty_applied": float(margin_call_penalty_applied),
         }
+        if action_result is not None:
+            info["requested_trade_direction"] = action_result.requested_direction
+            info["executed_trade_direction"] = action_result.executed_direction
+            info["agent_order_executed"] = bool(action_result.agent_order_executed)
+            info["executed_entry"] = bool(action_result.executed_entry)
+            info["agent_close_executed"] = bool(action_result.agent_close_executed)
+            info["blocked_trade_step"] = bool(action_result.blocked)
+            info["blocked_trade_reason"] = action_result.blocked_reason
         if self.trades:
             t = self.trades[-1]
             info["last_trade"] = {
@@ -438,7 +502,12 @@ class TradingEnv(gym.Env):
             "total_profit": total_profit,
             "max_drawdown": max_drawdown,
             "num_trades": float(self.trade_count),
+            "agent_orders": float(self.agent_order_count),
             "blocked_trades": float(self.blocked_trade_count),
+            "blocked_by_cooldown": float(self.blocked_trade_reason_counts.get("cooldown", 0)),
+            "blocked_by_min_notional": float(self.blocked_trade_reason_counts.get("min_notional", 0)),
+            "blocked_by_volume_min": float(self.blocked_trade_reason_counts.get("volume_min", 0)),
+            "blocked_by_invalid_stop_distance": float(self.blocked_trade_reason_counts.get("invalid_stop_distance", 0)),
             "blocked_trade_rate": blocked_trade_rate,
             "win_rate": win_rate,
             "profit_per_trade": profit_per_trade,

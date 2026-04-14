@@ -144,12 +144,13 @@ def prepare_runtime_environment_cfg(cfg: AppConfig, logger):
 
     if env_cfg.use_broker_constraints:
         logger.info(
-            "Simulação Hyperliquid ativada | balance=%.2f | volume_min=%.4f | step=%.4f | contract_size=%.4f | fixed_volume=%s",
+            "Simulação Hyperliquid ativada | balance=%.2f | volume_min=%.4f | step=%.4f | contract_size=%.4f | max_risk=%.2f%% | hold_threshold=%.2f",
             env_cfg.initial_balance,
             env_cfg.broker_volume_min,
             env_cfg.broker_volume_step,
             env_cfg.broker_contract_size,
-            env_cfg.fixed_trade_volume if env_cfg.use_fixed_trade_volume else "dinâmico",
+            env_cfg.max_risk_per_trade * 100.0,
+            env_cfg.action_hold_threshold,
         )
 
     return env_cfg
@@ -494,9 +495,8 @@ def build_live_observation(
     executor: HyperliquidExecutor,
     feature_cols: list[str],
     fe: FeatureEngineer,
-    obs_normalizer=None,
-) -> np.ndarray:
-    df = executor.fetch_historical()
+) -> tuple[np.ndarray, dict[str, float]]:
+    df = executor.get_live_market_window()
     feat = fe.build(df)
     feat_raw = feat.copy()
     if cfg.features.normalize:
@@ -540,10 +540,10 @@ def build_live_observation(
         ],
         dtype="float32",
     )
-    return maybe_normalize_obs(
-        np.concatenate([obs, extras]).astype(np.float32, copy=False),
-        obs_normalizer,
-    ).astype(np.float32, copy=False)
+    live_context = {
+        "entry_distance_from_ema_240": float(latest_raw.get("dist_ema_240", 0.0)),
+    }
+    return np.concatenate([obs, extras]).astype(np.float32, copy=False), live_context
 
 
 def infer_latest_action(model, obs: np.ndarray):
@@ -551,10 +551,10 @@ def infer_latest_action(model, obs: np.ndarray):
     return float(np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[0], -1.0, 1.0))
 
 
-def action_bucket(raw_action: float) -> int:
-    if raw_action > 0.1:
+def action_bucket(raw_action: float, hold_threshold: float) -> int:
+    if raw_action > hold_threshold:
         return 1
-    if raw_action < -0.1:
+    if raw_action < -hold_threshold:
         return -1
     return 0
 
@@ -585,12 +585,12 @@ def execution_models_available(cfg: AppConfig) -> bool:
     return (Path(cfg.paths.models_dir) / f"{cfg.training.model_name}.zip").exists()
 
 
-def infer_latest_action_ensemble(models, obs: np.ndarray):
+def infer_latest_action_ensemble(models, obs: np.ndarray, hold_threshold: float):
     if not isinstance(models, list):
         model, obs_normalizer = models
         model_obs = maybe_normalize_obs(obs, obs_normalizer)
         raw_action = infer_latest_action(model, model_obs)
-        bucket = action_bucket(raw_action)
+        bucket = action_bucket(raw_action, hold_threshold)
         return raw_action, {
             "mode": "single",
             "raw_action": raw_action,
@@ -603,7 +603,7 @@ def infer_latest_action_ensemble(models, obs: np.ndarray):
         raw_actions.append(infer_latest_action(model, model_obs))
 
     mean_action = float(np.mean(raw_actions)) if raw_actions else 0.0
-    buckets = [action_bucket(raw_action) for raw_action in raw_actions]
+    buckets = [action_bucket(raw_action, hold_threshold) for raw_action in raw_actions]
     counts = {label: 0 for label in ("buy", "hold", "sell")}
     for bucket in buckets:
         counts[action_bucket_label(bucket)] += 1
@@ -612,9 +612,9 @@ def infer_latest_action_ensemble(models, obs: np.ndarray):
         "mode": "ensemble",
         "raw_actions": [float(x) for x in raw_actions],
         "mean_action": mean_action,
-        "bucket": action_bucket_label(action_bucket(mean_action)),
+        "bucket": action_bucket_label(action_bucket(mean_action, hold_threshold)),
         "votes": counts,
-        "neutral_conflict": counts["buy"] > 0 and counts["sell"] > 0 and action_bucket(mean_action) == 0,
+        "neutral_conflict": counts["buy"] > 0 and counts["sell"] > 0 and action_bucket(mean_action, hold_threshold) == 0,
     }
 
 
@@ -684,12 +684,17 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
 
     try:
         while True:
-            obs = build_live_observation(cfg, executor, cols, fe)
-            action, vote_info = infer_latest_action_ensemble(model_entries, obs)
+            obs, live_context = build_live_observation(cfg, executor, cols, fe)
+            action, vote_info = infer_latest_action_ensemble(
+                model_entries,
+                obs,
+                float(cfg.environment.action_hold_threshold),
+            )
             result = executor.execute(
                 ExecutionDecision(
                     action=action,
                     reason=f"ação inferida pelo PPO ({json.dumps(vote_info, ensure_ascii=False)})",
+                    entry_distance_from_ema_240=float(live_context["entry_distance_from_ema_240"]),
                 )
             )
             logger.info(
