@@ -40,6 +40,7 @@ def build_metric_snapshot(metrics: dict) -> dict[str, float]:
         "blocked_by_regime_filter",
         "trades_allowed_by_regime_filter",
         "pct_bars_with_valid_regime",
+        "pct_bars_filtered_by_regime",
         "win_rate",
         "blocked_trade_rate",
         "final_equity",
@@ -181,7 +182,7 @@ def prepare_datasets(cfg: AppConfig, logger):
 
 def evaluate_acceptance(metrics: dict, cfg: AppConfig) -> tuple[bool, str]:
     min_profit = float(cfg.training.acceptance_min_total_profit)
-    max_dd_abs = float(cfg.training.acceptance_max_drawdown_abs)
+    max_dd_abs = float(cfg.training.max_drawdown_limit)
     min_ppt = float(cfg.training.acceptance_min_profit_per_trade)
 
     total_profit = float(metrics.get("total_profit", 0.0))
@@ -323,6 +324,7 @@ def train_multi_pipeline(cfg: AppConfig, logger, seeds: list[int]):
                 "blocked_by_regime_filter": float(metrics.get("blocked_by_regime_filter", 0.0)),
                 "trades_allowed_by_regime_filter": float(metrics.get("trades_allowed_by_regime_filter", 0.0)),
                 "pct_bars_with_valid_regime": float(metrics.get("pct_bars_with_valid_regime", 0.0)),
+                "pct_bars_filtered_by_regime": float(metrics.get("pct_bars_filtered_by_regime", 0.0)),
                 "blocked_trade_rate": float(metrics.get("blocked_trade_rate", 0.0)),
                 "win_rate": float(metrics.get("win_rate", 0.0)),
                 "profit_per_trade": float(metrics.get("profit_per_trade", 0.0)),
@@ -505,6 +507,9 @@ def backtest_pipeline(cfg: AppConfig, logger, model_path: str | None):
                         result.metrics.get("trades_allowed_by_regime_filter", 0.0)
                     ),
                     "pct_bars_with_valid_regime": float(result.metrics.get("pct_bars_with_valid_regime", 0.0)),
+                    "pct_bars_filtered_by_regime": float(
+                        result.metrics.get("pct_bars_filtered_by_regime", 0.0)
+                    ),
                     "win_rate": float(result.metrics.get("win_rate", 0.0)),
                     "profit_per_trade": float(result.metrics.get("profit_per_trade", 0.0)),
                     "final_equity": float(result.metrics.get("final_equity", 0.0)),
@@ -558,6 +563,9 @@ def backtest_pipeline(cfg: AppConfig, logger, model_path: str | None):
                 ),
                 "pct_bars_with_valid_regime": float(
                     ensemble_result.metrics.get("pct_bars_with_valid_regime", 0.0)
+                ),
+                "pct_bars_filtered_by_regime": float(
+                    ensemble_result.metrics.get("pct_bars_filtered_by_regime", 0.0)
                 ),
                 "win_rate": float(ensemble_result.metrics.get("win_rate", 0.0)),
                 "profit_per_trade": float(ensemble_result.metrics.get("profit_per_trade", 0.0)),

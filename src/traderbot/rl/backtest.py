@@ -246,6 +246,7 @@ def print_metrics(metrics: dict[str, Any]) -> str:
         f"Trades: {int(metrics['num_trades'])} | "
         f"Bloqueados: {int(metrics.get('blocked_trades', 0))} | "
         f"Regime ok: {metrics.get('pct_bars_with_valid_regime', 0.0):.2%} | "
+        f"Regime filtrado: {metrics.get('pct_bars_filtered_by_regime', 0.0):.2%} | "
         f"Bloq.regime: {int(metrics.get('blocked_by_regime_filter', 0))} | "
         f"Profit/trade: {metrics.get('profit_per_trade', 0.0):.4f} | "
         f"Taxa de acerto: {metrics['win_rate']:.2%} | "

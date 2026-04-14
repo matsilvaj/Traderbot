@@ -178,13 +178,9 @@ class TradingEnv(gym.Env):
     def _is_valid_regime(self, idx: int) -> bool:
         dist_ema_240 = self._regime_value(idx, "regime_dist_ema_240_raw", "dist_ema_240")
         vol_regime_z = self._regime_value(idx, "regime_vol_regime_z_raw", "vol_regime_z")
-        breakout_up_10 = self._regime_value(idx, "regime_breakout_up_10_flag", "breakout_up_10")
-        breakout_down_10 = self._regime_value(idx, "regime_breakout_down_10_flag", "breakout_down_10")
         return (
-            abs(dist_ema_240) >= 0.01
-            or vol_regime_z > 0.0
-            or breakout_up_10 == 1.0
-            or breakout_down_10 == 1.0
+            abs(dist_ema_240) >= float(self.cfg.regime_min_abs_dist_ema_240)
+            and vol_regime_z > float(self.cfg.regime_min_vol_regime_z)
         )
 
     def _price(self, idx: int) -> float:
@@ -630,6 +626,7 @@ class TradingEnv(gym.Env):
         pct_bars_with_valid_regime = (
             float(self.valid_regime_bar_count / self.regime_bar_count) if self.regime_bar_count > 0 else 0.0
         )
+        pct_bars_filtered_by_regime = float(1.0 - pct_bars_with_valid_regime) if self.regime_bar_count > 0 else 0.0
 
         return {
             "total_profit": total_profit,
@@ -644,6 +641,7 @@ class TradingEnv(gym.Env):
             "blocked_by_regime_filter": float(self.blocked_by_regime_filter_count),
             "trades_allowed_by_regime_filter": float(self.trades_allowed_by_regime_filter_count),
             "pct_bars_with_valid_regime": pct_bars_with_valid_regime,
+            "pct_bars_filtered_by_regime": pct_bars_filtered_by_regime,
             "blocked_trade_rate": blocked_trade_rate,
             "attempted_reversals": float(self.attempted_reversal_count),
             "prevented_same_candle_reversals": float(self.prevented_same_candle_reversal_count),

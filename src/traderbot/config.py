@@ -48,9 +48,11 @@ class FeatureConfig:
 class EnvironmentConfig:
     initial_balance: float = 250.0
     simulation_initial_balance: Optional[float] = None
-    max_risk_per_trade: float = 0.02
+    max_risk_per_trade: float = 0.01
     min_risk_per_trade: float = 0.001
-    action_hold_threshold: float = 0.60
+    action_hold_threshold: float = 0.65
+    regime_min_abs_dist_ema_240: float = 0.025
+    regime_min_vol_regime_z: float = 0.3
     taker_fee_pct: float = 0.00045
     slippage_pct: float = 0.00010
     stop_loss_pct: float = 0.02
@@ -102,7 +104,7 @@ class TrainingConfig:
     log_interval_steps: int = 5_000
     log_trade_events: bool = False
     acceptance_min_total_profit: float = 0.0
-    acceptance_max_drawdown_abs: float = 0.001
+    max_drawdown_limit: float = 0.40
     acceptance_min_profit_per_trade: float = 0.0
     acceptance_min_pass_rate: float = 0.6
 
