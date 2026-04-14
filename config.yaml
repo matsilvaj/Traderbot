@@ -1,0 +1,113 @@
+﻿app_name: traderbot-rl
+
+paths:
+  models_dir: models
+  results_dir: results
+  logs_dir: logs
+
+mt5:
+  enabled: true
+  login: null
+  password: null
+  server: null
+  path: null
+  symbol: BTCUSD
+  timeframe: M5
+  history_bars: 500000
+
+data:
+  source: csv
+  csv_path: data/binance_btcusdt_m5.csv
+  timestamp_column: timestamp
+
+features:
+  rsi_period: 14
+  ma_short_period: 9
+  ma_long_period: 21
+  momentum_period: 3
+  normalize: true
+
+environment:
+  initial_balance: 10000.0
+  simulation_initial_balance: 250.0
+  use_fixed_trade_volume: true
+  fixed_trade_volume: 0.01
+  spread_bps: 0.0
+  slippage_bps: 0.5
+  stop_loss_pct: 0.005
+  take_profit_pct: 0.01
+  reward_clip_limit: 5.0
+  pain_decay_factor: 0.01
+  overtrade_penalty: 0.002
+  loss_penalty_factor: 0.0
+  quality_bonus_factor: 0.1
+  unrealized_delta_reward_factor: 0.0
+  unrealized_level_reward_factor: 0.0
+  active_position_bonus: 0.0
+  flat_position_penalty: 0.0
+  flat_steps_threshold: 50
+  flat_inactivity_penalty: 0.0
+  use_broker_constraints: true
+  broker_volume_min: 0.01
+  broker_volume_step: 0.01
+  broker_volume_max: 22.0
+  broker_contract_size: 1.0
+  broker_point: 0.01
+  risk_per_trade: 0.012
+  block_trade_on_excess_risk: false
+  max_episode_steps: null
+  trade_cooldown_steps: 12
+  margin_call_drawdown_pct: 0.8
+  margin_call_penalty: 10.0
+
+ablation:
+  enabled: false
+  pain_decay_factors:
+    - 0.0
+    - 0.001
+    - 0.002
+
+training:
+  total_timesteps: 1000000
+  learning_rate: 0.0003
+  n_steps: 8192
+  batch_size: 1024
+  gamma: 0.995
+  gae_lambda: 0.95
+  ent_coef: 0.01
+  clip_range: 0.2
+  policy: MlpPolicy
+  device: cpu
+  num_envs: 6
+  episode_steps: 10000
+  model_name: ppo_btc_m5
+  train_split: 0.7
+  seed: null
+  log_interval_steps: 5000
+  log_trade_events: false
+  acceptance_min_total_profit: 2.0
+  acceptance_max_drawdown_abs: 0.08
+  acceptance_min_profit_per_trade: 0.0001
+  acceptance_min_pass_rate: 0.4
+
+execution:
+  mode: paper
+  lot: 0.01
+  use_dynamic_position_sizing: false
+  risk_per_trade: 0.012
+  defensive_drawdown_pct: 0.02
+  defensive_risk_multiplier: 0.5
+  validation_balance: 250.0
+  ensemble_enabled: true
+  ensemble_model_names:
+    - ppo_btc_m5_s123
+    - ppo_btc_m5_s512
+    - ppo_btc_m5_s2004
+  deviation: 20
+  magic: 20260407
+  allow_live_trading: false
+  min_seconds_between_orders: 10
+
+retraining:
+  enabled: false
+  interval_minutes: 60

@@ -1,0 +1,16 @@
+﻿# Core
+pandas>=2.2.0
+numpy>=1.26.0
+
+# RL
+gymnasium>=0.29.1
+stable-baselines3>=2.3.0
+torch>=2.2.0
+
+# Trading / integração
+MetaTrader5>=5.0.45
+ccxt>=4.4.0
+
+# Config e utilidades
+PyYAML>=6.0.1
+python-dotenv>=1.0.1

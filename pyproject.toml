@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traderbot-rl"
+version = "0.1.0"
+description = "Robô de trading com RL (PPO) integrado ao MetaTrader 5"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.2.0",
+  "numpy>=1.26.0",
+  "gymnasium>=0.29.1",
+  "stable-baselines3>=2.3.0",
+  "torch>=2.2.0",
+  "MetaTrader5>=5.0.45",
+  "ccxt>=4.4.0",
+  "PyYAML>=6.0.1",
+  "python-dotenv>=1.0.1"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
