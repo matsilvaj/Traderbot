@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
@@ -90,6 +91,19 @@ def _normalize_obs(obs, obs_normalizer):
     return obs_normalizer.normalize_obs(obs.reshape(1, -1))[0]
 
 
+def _coerce_action_array(action) -> Any:
+    return np.asarray(action, dtype=np.float32).reshape(1)
+
+
+def _action_bucket(action) -> int:
+    raw_action = float(np.asarray(action, dtype=np.float32).reshape(-1)[0])
+    if raw_action > 0.1:
+        return 1
+    if raw_action < -0.1:
+        return -1
+    return 0
+
+
 def run_backtest(
     model: PPO,
     df: pd.DataFrame,
@@ -110,7 +124,7 @@ def run_backtest(
     done = False
     while not done:
         action, _ = model.predict(_normalize_obs(obs, obs_normalizer), deterministic=deterministic)
-        obs, _, terminated, truncated, _ = env.step(int(action))
+        obs, _, terminated, truncated, _ = env.step(_coerce_action_array(action))
         done = terminated or truncated
         _maybe_log_backtest_progress(
             logger=logger,
@@ -156,22 +170,27 @@ def run_backtest_ensemble(
     total_steps = max(1, len(df) - 1)
     start_time = time.time()
 
-    vote_totals = {0: 0, 1: 0, 2: 0}
+    vote_totals = {-1: 0, 0: 0, 1: 0}
     tie_steps = 0
     done = False
     while not done:
-        votes = [
-            int(model.predict(_normalize_obs(obs, obs_normalizer), deterministic=deterministic)[0])
+        raw_actions = [
+            float(
+                np.asarray(
+                    model.predict(_normalize_obs(obs, obs_normalizer), deterministic=deterministic)[0],
+                    dtype=np.float32,
+                ).reshape(-1)[0]
+            )
             for model, obs_normalizer in model_entries
         ]
-        counts = {action: votes.count(action) for action in (0, 1, 2)}
-        for action, count in counts.items():
-            vote_totals[action] += count
+        buckets = [_action_bucket(action) for action in raw_actions]
+        counts = {bucket: buckets.count(bucket) for bucket in (-1, 0, 1)}
+        for bucket, count in counts.items():
+            vote_totals[bucket] += count
 
-        max_votes = max(counts.values())
-        winners = [action for action, count in counts.items() if count == max_votes]
-        action = 0 if len(winners) != 1 else winners[0]
-        if len(winners) != 1:
+        mean_action = float(np.mean(raw_actions))
+        action = np.array([mean_action], dtype=np.float32)
+        if counts[-1] > 0 and counts[1] > 0 and _action_bucket(action) == 0:
             tie_steps += 1
 
         obs, _, terminated, truncated, _ = env.step(action)
@@ -187,11 +206,11 @@ def run_backtest_ensemble(
         )
 
     metrics = env.get_metrics()
-    metrics["decision_mode"] = "ensemble_majority_vote"
+    metrics["decision_mode"] = "ensemble_signal_mean"
     metrics["ensemble_size"] = float(len(models))
     metrics["vote_hold_total"] = float(vote_totals[0])
     metrics["vote_buy_total"] = float(vote_totals[1])
-    metrics["vote_sell_total"] = float(vote_totals[2])
+    metrics["vote_sell_total"] = float(vote_totals[-1])
     metrics["tie_steps"] = float(tie_steps)
     metrics["backtest_elapsed_seconds"] = float(time.time() - start_time)
     return _build_backtest_result(env, metrics)

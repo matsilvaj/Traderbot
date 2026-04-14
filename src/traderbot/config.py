@@ -45,10 +45,12 @@ class FeatureConfig:
 
 @dataclass
 class EnvironmentConfig:
-    initial_balance: float = 10_000.0
+    initial_balance: float = 250.0
     simulation_initial_balance: Optional[float] = None
     use_fixed_trade_volume: bool = False
     fixed_trade_volume: float = 0.001
+    max_risk_per_trade: float = 0.05
+    min_risk_per_trade: float = 0.001
     taker_fee_pct: float = 0.00045
     maker_fee_pct: float = 0.00015
     slippage_pct: float = 0.00010
@@ -65,14 +67,15 @@ class EnvironmentConfig:
     flat_position_penalty: float = 0.0
     flat_steps_threshold: int = 50
     flat_inactivity_penalty: float = 0.0
-    use_broker_constraints: bool = False
+    broker_min_notional_usd: float = 10.0
+    use_broker_constraints: bool = True
     broker_volume_min: float = 0.0001
     broker_volume_step: float = 0.0001
     broker_volume_max: float = 0.0
     broker_contract_size: float = 1.0
     broker_point: float = 1.0
     risk_per_trade: float = 0.01
-    block_trade_on_excess_risk: bool = True
+    block_trade_on_excess_risk: bool = False
     max_episode_steps: Optional[int] = None
     trade_cooldown_steps: int = 12
     margin_call_drawdown_pct: float = 0.8

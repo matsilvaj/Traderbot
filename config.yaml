@@ -13,7 +13,7 @@ hyperliquid:
   network: mainnet      # mainnet ou testnet
   symbol: BTC           # Na HL o ativo é apenas BTC (e não BTCUSD)
   timeframe: 5m         # Formato CCXT/HL
-  history_bars: 10000
+  history_bars: 500000
 
 data:
   source: csv
@@ -28,10 +28,12 @@ features:
   normalize: true
 
 environment:
-  initial_balance: 10000.0
+  initial_balance: 250.0
   simulation_initial_balance: 250.0
-  use_fixed_trade_volume: true
+  use_fixed_trade_volume: false
   fixed_trade_volume: 0.001
+  max_risk_per_trade: 0.05
+  min_risk_per_trade: 0.001
 
   # NOVAS TAXAS (Substituem spread_bps e slippage_bps)
   taker_fee_pct: 0.00045   # 0.045% - Taxa Base Taker da HL (Tier 0)
@@ -50,6 +52,7 @@ environment:
   flat_position_penalty: 0.0
   flat_steps_threshold: 50
   flat_inactivity_penalty: 0.0
+  broker_min_notional_usd: 10.0
   use_broker_constraints: true
 
   # VALORES ATUALIZADOS PARA HYPERLIQUID (BTC)

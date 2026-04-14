@@ -142,13 +142,6 @@ def prepare_runtime_environment_cfg(cfg: AppConfig, logger):
     elif cfg.execution.validation_balance is not None:
         env_cfg.initial_balance = float(cfg.execution.validation_balance)
 
-    env_cfg.use_fixed_trade_volume = not bool(cfg.execution.use_dynamic_position_sizing)
-    env_cfg.fixed_trade_volume = float(cfg.execution.lot)
-    if env_cfg.use_fixed_trade_volume:
-        env_cfg.block_trade_on_excess_risk = False
-    else:
-        env_cfg.risk_per_trade = float(cfg.execution.risk_per_trade)
-
     if env_cfg.use_broker_constraints:
         logger.info(
             "Simulação Hyperliquid ativada | balance=%.2f | volume_min=%.4f | step=%.4f | contract_size=%.4f | fixed_volume=%s",
@@ -517,11 +510,20 @@ def build_live_observation(
     side = float(position_snapshot["side"])
     unrealized = float(position_snapshot["unrealized_pnl"])
     entry_price = float(position_snapshot.get("avg_entry_price", 0.0))
+    time_in_position = float(position_snapshot.get("time_in_position", 0.0))
     if side != 0.0 and entry_price > 0:
-        stop_move = ((current_price - (entry_price * (1.0 - cfg.environment.stop_loss_pct * side))) / entry_price) * side
-        take_move = (((entry_price * (1.0 + cfg.environment.take_profit_pct * side)) - current_price) / entry_price) * side
-        entry_distance_from_ema_240 = (
-            (entry_price - float(latest_raw.get("ema_240", entry_price))) / (float(latest_raw.get("ema_240", entry_price)) + 1e-12)
+        stop_move = (
+            (current_price - (entry_price * (1.0 - cfg.environment.stop_loss_pct * side))) / entry_price
+        ) * side
+        take_move = (
+            ((entry_price * (1.0 + cfg.environment.take_profit_pct * side)) - current_price) / entry_price
+        ) * side
+        entry_distance_from_ema_240 = float(
+            position_snapshot.get(
+                "entry_distance_from_ema_240",
+                (entry_price - float(latest_raw.get("ema_240", entry_price)))
+                / (float(latest_raw.get("ema_240", entry_price)) + 1e-12),
+            )
         )
     else:
         stop_move = 0.0
@@ -531,7 +533,7 @@ def build_live_observation(
         [
             side,
             unrealized,
-            0.0,
+            time_in_position,
             float(stop_move),
             float(take_move),
             float(entry_distance_from_ema_240),
@@ -546,7 +548,19 @@ def build_live_observation(
 
 def infer_latest_action(model, obs: np.ndarray):
     action, _ = model.predict(obs, deterministic=True)
-    return int(action)
+    return float(np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[0], -1.0, 1.0))
+
+
+def action_bucket(raw_action: float) -> int:
+    if raw_action > 0.1:
+        return 1
+    if raw_action < -0.1:
+        return -1
+    return 0
+
+
+def action_bucket_label(bucket: int) -> str:
+    return {1: "buy", -1: "sell", 0: "hold"}[bucket]
 
 
 def load_execution_models(cfg: AppConfig, logger):
@@ -573,22 +587,39 @@ def execution_models_available(cfg: AppConfig) -> bool:
 
 def infer_latest_action_ensemble(models, obs: np.ndarray):
     if not isinstance(models, list):
-        model, _stats_path = models
-        action = infer_latest_action(model, obs)
-        return action, {"mode": "single", "votes": {str(action): 1}}
+        model, obs_normalizer = models
+        model_obs = maybe_normalize_obs(obs, obs_normalizer)
+        raw_action = infer_latest_action(model, model_obs)
+        bucket = action_bucket(raw_action)
+        return raw_action, {
+            "mode": "single",
+            "raw_action": raw_action,
+            "bucket": action_bucket_label(bucket),
+        }
 
-    votes = [int(model.predict(obs, deterministic=True)[0]) for model, _stats_path in models]
-    counts = {action: votes.count(action) for action in (0, 1, 2)}
-    max_votes = max(counts.values())
-    winners = [action for action, count in counts.items() if count == max_votes]
-    action = 0 if len(winners) != 1 else winners[0]
-    return action, {"mode": "ensemble", "votes": counts}
+    raw_actions = []
+    for model, obs_normalizer in models:
+        model_obs = maybe_normalize_obs(obs, obs_normalizer)
+        raw_actions.append(infer_latest_action(model, model_obs))
+
+    mean_action = float(np.mean(raw_actions)) if raw_actions else 0.0
+    buckets = [action_bucket(raw_action) for raw_action in raw_actions]
+    counts = {label: 0 for label in ("buy", "hold", "sell")}
+    for bucket in buckets:
+        counts[action_bucket_label(bucket)] += 1
+
+    return mean_action, {
+        "mode": "ensemble",
+        "raw_actions": [float(x) for x in raw_actions],
+        "mean_action": mean_action,
+        "bucket": action_bucket_label(action_bucket(mean_action)),
+        "votes": counts,
+        "neutral_conflict": counts["buy"] > 0 and counts["sell"] > 0 and action_bucket(mean_action) == 0,
+    }
 
 
 def prepare_live_inference_context(cfg: AppConfig, logger):
     train_df, _, fe, cols = prepare_datasets(cfg, logger)
-    if cfg.features.normalize:
-        fe.fit_normalizer(train_df, cols)
     return fe, cols, train_df
 
 
@@ -642,6 +673,7 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
     executor = HyperliquidExecutor(
         cfg.hyperliquid,
         cfg.execution,
+        env_cfg,
         stop_loss_pct=cfg.environment.stop_loss_pct,
         take_profit_pct=cfg.environment.take_profit_pct,
         slippage_pct=cfg.environment.slippage_pct,
@@ -652,22 +684,8 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
 
     try:
         while True:
-            if isinstance(model_entries, list):
-                obs = build_live_observation(cfg, executor, cols, fe)
-                normalized_models = [
-                    (model, maybe_normalize_obs(obs, obs_normalizer))
-                    for model, obs_normalizer in model_entries
-                ]
-                votes = [int(model.predict(model_obs, deterministic=True)[0]) for model, model_obs in normalized_models]
-                counts = {action: votes.count(action) for action in (0, 1, 2)}
-                max_votes = max(counts.values())
-                winners = [action for action, count in counts.items() if count == max_votes]
-                action = 0 if len(winners) != 1 else winners[0]
-                vote_info = {"mode": "ensemble", "votes": counts}
-            else:
-                model, obs_normalizer = model_entries
-                obs = build_live_observation(cfg, executor, cols, fe, obs_normalizer=obs_normalizer)
-                action, vote_info = infer_latest_action_ensemble((model, None), obs)
+            obs = build_live_observation(cfg, executor, cols, fe)
+            action, vote_info = infer_latest_action_ensemble(model_entries, obs)
             result = executor.execute(
                 ExecutionDecision(
                     action=action,
@@ -713,6 +731,7 @@ def check_hyperliquid_pipeline(cfg: AppConfig, logger):
     executor = HyperliquidExecutor(
         cfg.hyperliquid,
         cfg.execution,
+        cfg.environment,
         stop_loss_pct=cfg.environment.stop_loss_pct,
         take_profit_pct=cfg.environment.take_profit_pct,
         slippage_pct=cfg.environment.slippage_pct,
@@ -724,7 +743,7 @@ def check_hyperliquid_pipeline(cfg: AppConfig, logger):
         risk_state = executor.get_account_risk_state()
         validation_sizing = executor.calculate_order_volume(
             balance=cfg.execution.validation_balance,
-            stop_loss_pct=cfg.environment.stop_loss_pct,
+            dynamic_risk_pct=float(cfg.environment.max_risk_per_trade),
             defensive=False,
         )
         status["trading_spec"] = {

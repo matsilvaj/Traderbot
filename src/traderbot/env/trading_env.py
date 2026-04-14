@@ -20,12 +20,13 @@ class TradeEvent:
 
 
 class TradingEnv(gym.Env):
-    """Ambiente de trading para scalping BTC M1.
+    """Ambiente de trading para scalping BTC.
 
     Ações:
-        0: HOLD
-        1: BUY (alvo = posição comprada)
-        2: SELL (alvo = posição vendida)
+        Valor contínuo em [-1, 1]
+        > 0.1: BUY
+        < -0.1: SELL
+        caso contrário: HOLD
     """
 
     metadata = {"render_modes": ["human"]}
@@ -57,7 +58,7 @@ class TradingEnv(gym.Env):
             shape=(obs_dim,),
             dtype=np.float32,
         )
-        self.action_space = spaces.Discrete(3)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
 
         self.current_step = 0
         self.last_equity = self.cfg.initial_balance
@@ -129,31 +130,45 @@ class TradingEnv(gym.Env):
         rounded = np.floor(volume / step) * step
         return max(float(rounded), volume_min)
 
-    def _calculate_trade_volume(self, price: float) -> tuple[float, bool]:
+    def _calculate_trade_volume(self, price: float, dynamic_risk_pct: float) -> tuple[float, bool]:
         if self.cfg.use_fixed_trade_volume:
             volume = float(self.cfg.fixed_trade_volume)
             if self.cfg.use_broker_constraints:
                 volume = self._round_volume_to_step(volume)
-                if float(self.cfg.broker_volume_max) > 0:
-                    volume = min(volume, float(self.cfg.broker_volume_max))
             return float(volume), False
 
         if not self.cfg.use_broker_constraints:
             return 1.0, False
 
+        # Cálculo do risco financeiro baseado na IA
         balance = float(self.balance)
-        risk_amount = balance * float(self.cfg.risk_per_trade)
+        risk_amount = balance * dynamic_risk_pct
+
+        # Distância financeira do stop
         stop_distance_price = price * float(self.cfg.stop_loss_pct)
-        contract_size = max(float(self.cfg.broker_contract_size), 1e-12)
-        loss_per_lot = stop_distance_price * contract_size
-        raw_volume = 0.0 if loss_per_lot <= 0 else (risk_amount / loss_per_lot)
 
-        if raw_volume < float(self.cfg.broker_volume_min) and self.cfg.block_trade_on_excess_risk:
-            return 0.0, True
-
+        # Tamanho em BTC
+        raw_volume = 0.0 if stop_distance_price <= 0 else (risk_amount / stop_distance_price)
         volume = self._round_volume_to_step(raw_volume)
+
+        # Restrição Hyperliquid: Notional Mínimo ($10)
+        min_notional_usd = getattr(self.cfg, "broker_min_notional_usd", 10.0)
+        notional_value = volume * price
+
+        if notional_value < min_notional_usd:
+            if getattr(self.cfg, "block_trade_on_excess_risk", False):
+                return 0.0, True
+            else:
+                volume = self._round_volume_to_step(min_notional_usd / price)
+
+        # Restrição de volume máximo
         if float(self.cfg.broker_volume_max) > 0:
             volume = min(volume, float(self.cfg.broker_volume_max))
+
+        # Restrição final de step
+        if volume < float(self.cfg.broker_volume_min):
+            return 0.0, True
+
         return float(volume), False
 
     def _close_position(self, price: float) -> float:
@@ -187,7 +202,7 @@ class TradingEnv(gym.Env):
         self.cooldown_steps_remaining = max(0, int(self.cfg.trade_cooldown_steps))
         return pnl
 
-    def _open_position(self, target_position: int, price: float) -> tuple[float, bool]:
+    def _open_position(self, target_position: int, price: float, dynamic_risk_pct: float) -> tuple[float, bool]:
         if target_position == 0:
             return 0.0, False
 
@@ -195,7 +210,7 @@ class TradingEnv(gym.Env):
             self.blocked_trade_count += 1
             return 0.0, False
 
-        volume, blocked = self._calculate_trade_volume(price)
+        volume, blocked = self._calculate_trade_volume(price, dynamic_risk_pct)
         if blocked or volume <= 0:
             self.blocked_trade_count += 1
             return 0.0, False
@@ -213,9 +228,9 @@ class TradingEnv(gym.Env):
             self.entry_distance_from_ema_240 = 0.0
         return -cost, True
 
-    def _apply_action(self, action: int, price: float) -> tuple[float, int]:
+    def _apply_action(self, trade_direction: str, price: float, dynamic_risk_pct: float) -> tuple[float, int]:
         # mapeamento de ação para posição alvo
-        target_position = {0: self.position, 1: 1, 2: -1}[action]
+        target_position = {"HOLD": self.position, "BUY": 1, "SELL": -1}[trade_direction]
 
         realized_pnl = 0.0
         position_changes = 0
@@ -228,7 +243,7 @@ class TradingEnv(gym.Env):
 
             # Abre nova posição
             if target_position != 0:
-                open_pnl, opened = self._open_position(target_position, price)
+                open_pnl, opened = self._open_position(target_position, price, dynamic_risk_pct)
                 realized_pnl += open_pnl
                 if opened:
                     position_changes += 1
@@ -274,28 +289,36 @@ class TradingEnv(gym.Env):
         )
         return np.concatenate([row, extras], axis=0)
 
-    def step(self, action: int):
+    def step(self, action):
+        action_arr = np.asarray(action, dtype=np.float32).reshape(-1)
+        raw_action = float(action_arr[0])
+        raw_action = float(np.clip(raw_action, -1.0, 1.0))
+        previous_balance = float(self.balance)
+
+        # Define a direção
+        if raw_action > 0.1:
+            trade_direction = "BUY"
+        elif raw_action < -0.1:
+            trade_direction = "SELL"
+        else:
+            trade_direction = "HOLD"
+
+        # Calcula o Risco Dinâmico (%)
+        action_magnitude = abs(raw_action)
+        dynamic_risk_pct = action_magnitude * float(self.cfg.max_risk_per_trade)
+
+        if trade_direction != "HOLD":
+            dynamic_risk_pct = max(dynamic_risk_pct, float(self.cfg.min_risk_per_trade))
+
         current_price = self._price(self.current_step)
         starting_cooldown = self.cooldown_steps_remaining
         realized_pnl, position_changes = self._check_stop_take(current_price)
-        action_pnl, action_changes = self._apply_action(action, current_price)
+        action_pnl, action_changes = self._apply_action(trade_direction, current_price, dynamic_risk_pct)
         realized_pnl += action_pnl
         position_changes += action_changes
 
         unrealized = self._unrealized_pnl(current_price)
         self.equity = self.balance + unrealized
-
-        reward = self.equity - self.last_equity
-        reward -= float(self.cfg.overtrade_penalty) * position_changes
-
-        pain_penalty = float(
-            np.clip(
-                min(0.0, unrealized) * float(self.cfg.pain_decay_factor),
-                -float(self.cfg.reward_clip_limit),
-                0.0,
-            )
-        )
-        reward += pain_penalty
 
         margin_call = False
         margin_call_penalty_applied = 0.0
@@ -306,19 +329,9 @@ class TradingEnv(gym.Env):
             if self.position != 0:
                 forced_close_pnl = self._close_position(current_price)
                 realized_pnl += forced_close_pnl
-                close_adjustment = self.balance - self.equity
-                self.equity = self.balance
-                reward += close_adjustment
+            unrealized = 0.0
+            self.equity = self.balance
             margin_call_penalty_applied = float(self.cfg.margin_call_penalty)
-            reward -= margin_call_penalty_applied
-
-        reward = float(
-            np.clip(
-                reward,
-                -float(self.cfg.reward_clip_limit),
-                float(self.cfg.reward_clip_limit),
-            )
-        )
 
         self.current_step += 1
         terminated = self.current_step >= len(self.df) - 1 or margin_call
@@ -330,18 +343,46 @@ class TradingEnv(gym.Env):
 
         if terminated and not margin_call and self.position != 0:
             final_price = self._price(self.current_step)
-            pre_close_equity = self.equity
             terminal_close_pnl = self._close_position(final_price)
             realized_pnl += terminal_close_pnl
+            unrealized = 0.0
             self.equity = self.balance
-            reward += self.balance - pre_close_equity
-            reward = float(
-                np.clip(
-                    reward,
-                    -float(self.cfg.reward_clip_limit),
-                    float(self.cfg.reward_clip_limit),
-                )
+
+        step_pnl = float(self.balance) - previous_balance
+        pct_return = step_pnl / max(previous_balance, 1e-12)
+        base_reward = pct_return * 100.0
+
+        risk_penalty = 0.0
+        if trade_direction != "HOLD":
+            if step_pnl <= 0:
+                risk_penalty = action_magnitude * 0.1
+            else:
+                assumed_risk = max(action_magnitude * float(self.cfg.max_risk_per_trade), 1e-12)
+                if (pct_return / assumed_risk) < 0.5:
+                    risk_penalty = action_magnitude * 0.05
+
+        reward = base_reward - risk_penalty
+        reward -= float(self.cfg.overtrade_penalty if trade_direction != "HOLD" else 0.0)
+
+        pain_penalty = float(
+            np.clip(
+                min(0.0, unrealized) * float(self.cfg.pain_decay_factor),
+                -float(self.cfg.reward_clip_limit),
+                0.0,
             )
+        )
+        reward += pain_penalty
+
+        if margin_call_penalty_applied > 0.0:
+            reward -= margin_call_penalty_applied
+
+        reward = float(
+            np.clip(
+                reward,
+                -float(self.cfg.reward_clip_limit),
+                float(self.cfg.reward_clip_limit),
+            )
+        )
 
         self.last_equity = self.equity
         self.equity_curve.append(self.equity)

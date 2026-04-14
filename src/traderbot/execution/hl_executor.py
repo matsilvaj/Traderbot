@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from math import floor
 from typing import Optional
 
-from traderbot.config import ExecutionConfig, HyperliquidConfig
+from traderbot.config import EnvironmentConfig, ExecutionConfig, HyperliquidConfig, TIMEFRAME_MINUTES_MAP
 from traderbot.data.hl_loader import HLDataLoader
 
 try:
@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover
 
 @dataclass
 class ExecutionDecision:
-    action: int
+    action: float
     reason: str = ""
 
 
@@ -40,7 +40,7 @@ class SymbolTradingSpec:
 
 
 class HyperliquidExecutor:
-    """Executor paper/live para Hyperliquid mantendo interface próxima à do MT5."""
+    """Paper/live executor for Hyperliquid using continuous actions in [-1, 1]."""
 
     DEFAULT_VOLUME_MIN = 0.0001
     DEFAULT_VOLUME_STEP = 0.0001
@@ -52,12 +52,14 @@ class HyperliquidExecutor:
         self,
         hl_cfg: HyperliquidConfig,
         exec_cfg: ExecutionConfig,
+        env_cfg: EnvironmentConfig,
         stop_loss_pct: float = 0.003,
         take_profit_pct: float = 0.006,
         slippage_pct: float = 0.00010,
     ):
         self.hl_cfg = hl_cfg
         self.exec_cfg = exec_cfg
+        self.env_cfg = env_cfg
         self.stop_loss_pct = float(stop_loss_pct)
         self.take_profit_pct = float(take_profit_pct)
         self.slippage_pct = float(slippage_pct)
@@ -72,6 +74,9 @@ class HyperliquidExecutor:
         self.paper_position = 0
         self.paper_entry_price = 0.0
         self.paper_volume = 0.0
+        self.paper_balance = float(self.env_cfg.initial_balance)
+        self.paper_entry_opened_at: Optional[float] = None
+        self.live_entry_opened_at: Optional[float] = None
 
     def _base_url(self) -> str:
         network = str(self.hl_cfg.network).lower().strip()
@@ -100,11 +105,17 @@ class HyperliquidExecutor:
     def connect(self) -> None:
         if Info is None or Exchange is None or LocalAccount is None:
             raise RuntimeError(
-                "Pacote hyperliquid-python-sdk não encontrado. Instale as dependências do requirements.txt."
+                "Hyperliquid SDK not found. Install the dependencies from requirements.txt."
             )
 
         self.loader.connect()
         self.info = self.loader.info
+        self.paper_balance = float(self.env_cfg.initial_balance)
+        self.paper_position = 0
+        self.paper_entry_price = 0.0
+        self.paper_volume = 0.0
+        self.paper_entry_opened_at = None
+        self.live_entry_opened_at = None
 
         wallet_address = self._clean_secret(self.hl_cfg.wallet_address)
         private_key = self._clean_secret(self.hl_cfg.private_key)
@@ -123,9 +134,7 @@ class HyperliquidExecutor:
             self.exchange = None
 
         if self.exec_cfg.mode.lower() != "paper" and self.exec_cfg.allow_live_trading and self.exchange is None:
-            raise RuntimeError(
-                "Execução live na Hyperliquid requer HL_PRIVATE_KEY no .env."
-            )
+            raise RuntimeError("Live trading on Hyperliquid requires HL_PRIVATE_KEY in .env.")
 
     def disconnect(self) -> None:
         self.loader.disconnect()
@@ -143,7 +152,7 @@ class HyperliquidExecutor:
         symbol = str(self.hl_cfg.symbol)
         price = mids.get(symbol)
         if price is None:
-            raise RuntimeError(f"Preço médio indisponível para '{symbol}' na Hyperliquid.")
+            raise RuntimeError(f"Mid price unavailable for '{symbol}' on Hyperliquid.")
         return float(price)
 
     def check_connection(self) -> dict:
@@ -163,18 +172,18 @@ class HyperliquidExecutor:
     def get_symbol_trading_spec(self) -> SymbolTradingSpec:
         return SymbolTradingSpec(
             symbol=str(self.hl_cfg.symbol),
-            volume_min=self.DEFAULT_VOLUME_MIN,
-            volume_step=self.DEFAULT_VOLUME_STEP,
-            volume_max=self.DEFAULT_VOLUME_MAX,
-            contract_size=self.DEFAULT_CONTRACT_SIZE,
-            point=self.DEFAULT_POINT,
+            volume_min=float(getattr(self.env_cfg, "broker_volume_min", self.DEFAULT_VOLUME_MIN)),
+            volume_step=float(getattr(self.env_cfg, "broker_volume_step", self.DEFAULT_VOLUME_STEP)),
+            volume_max=float(getattr(self.env_cfg, "broker_volume_max", self.DEFAULT_VOLUME_MAX)),
+            contract_size=float(getattr(self.env_cfg, "broker_contract_size", self.DEFAULT_CONTRACT_SIZE)),
+            point=float(getattr(self.env_cfg, "broker_point", self.DEFAULT_POINT)),
         )
 
     def get_account_balance(self) -> float:
         if self.exec_cfg.mode.lower() == "paper":
-            return float(self.exec_cfg.validation_balance)
+            return float(self.paper_balance)
         if not self.address:
-            raise RuntimeError("wallet_address não configurado para consultar saldo na Hyperliquid.")
+            raise RuntimeError("wallet_address is required to query Hyperliquid balance.")
 
         user_state = self._ensure_info().user_state(self.address)
         margin = user_state.get("marginSummary", {})
@@ -195,20 +204,67 @@ class HyperliquidExecutor:
         rounded = floor(volume / volume_step) * volume_step
         return max(rounded, volume_min)
 
-    def calculate_order_volume(self, balance: float, stop_loss_pct: float, defensive: bool = False) -> dict:
+    def _timeframe_seconds(self) -> float:
+        minutes = TIMEFRAME_MINUTES_MAP.get(str(self.hl_cfg.timeframe).upper(), 1)
+        return max(60.0, float(minutes) * 60.0)
+
+    def _position_bars(self, opened_at: Optional[float]) -> float:
+        if opened_at is None:
+            return 0.0
+        elapsed = max(0.0, time.time() - opened_at)
+        return elapsed / self._timeframe_seconds()
+
+    def _trade_units(self, volume: float) -> float:
+        if not bool(getattr(self.env_cfg, "use_broker_constraints", True)):
+            return 1.0
         spec = self.get_symbol_trading_spec()
-        price = self._get_mid_price()
-        risk_pct = float(self.exec_cfg.risk_per_trade)
+        return float(volume) * max(float(spec.contract_size), 1.0)
+
+    def _estimate_cost(self, price: float, volume: float) -> float:
+        notional_value = float(price) * self._trade_units(volume)
+        total_fee_rate = float(self.env_cfg.taker_fee_pct) + float(self.env_cfg.slippage_pct)
+        return notional_value * total_fee_rate
+
+    def calculate_order_volume(
+        self,
+        balance: float,
+        dynamic_risk_pct: float,
+        price: Optional[float] = None,
+        defensive: bool = False,
+    ) -> dict:
+        spec = self.get_symbol_trading_spec()
+        price = float(self._get_mid_price() if price is None else price)
+        risk_pct = float(dynamic_risk_pct)
         if defensive:
             risk_pct *= float(self.exec_cfg.defensive_risk_multiplier)
 
         risk_amount = balance * risk_pct
-        stop_distance_price = price * float(stop_loss_pct)
+        stop_distance_price = price * float(self.stop_loss_pct)
         loss_per_lot = stop_distance_price * max(spec.contract_size, 1.0)
         raw_volume = 0.0 if loss_per_lot <= 0 else (risk_amount / loss_per_lot)
 
         adjusted_volume = self._round_volume_to_step(raw_volume, spec.volume_min, spec.volume_step)
-        adjusted_volume = min(adjusted_volume, spec.volume_max) if spec.volume_max > 0 else adjusted_volume
+        min_notional_usd = float(getattr(self.env_cfg, "broker_min_notional_usd", 10.0))
+        blocked_by_min_notional = False
+        bumped_to_min_notional = False
+
+        if min_notional_usd > 0 and (adjusted_volume * price) < min_notional_usd:
+            if bool(getattr(self.env_cfg, "block_trade_on_excess_risk", False)):
+                adjusted_volume = 0.0
+                blocked_by_min_notional = True
+            else:
+                adjusted_volume = self._round_volume_to_step(
+                    min_notional_usd / max(price, 1e-12),
+                    spec.volume_min,
+                    spec.volume_step,
+                )
+                bumped_to_min_notional = True
+
+        if spec.volume_max > 0:
+            adjusted_volume = min(adjusted_volume, spec.volume_max)
+        if adjusted_volume < spec.volume_min:
+            adjusted_volume = 0.0
+
         effective_risk = adjusted_volume * loss_per_lot
         exceeds_target_risk = effective_risk > risk_amount if risk_amount > 0 else False
 
@@ -218,7 +274,7 @@ class HyperliquidExecutor:
             "balance": balance,
             "risk_pct": risk_pct,
             "risk_amount": risk_amount,
-            "stop_loss_pct": stop_loss_pct,
+            "stop_loss_pct": self.stop_loss_pct,
             "stop_distance_price": stop_distance_price,
             "contract_size": spec.contract_size,
             "volume_min": spec.volume_min,
@@ -226,26 +282,57 @@ class HyperliquidExecutor:
             "volume_max": spec.volume_max,
             "raw_volume": raw_volume,
             "adjusted_volume": adjusted_volume,
+            "min_notional_usd": min_notional_usd,
+            "notional_value": adjusted_volume * price,
+            "blocked_by_min_notional": blocked_by_min_notional,
+            "bumped_to_min_notional": bumped_to_min_notional,
             "effective_risk_amount": effective_risk,
             "exceeds_target_risk": exceeds_target_risk,
         }
+
+    def _coerce_raw_action(self, action) -> float:
+        try:
+            raw_action = float(action)
+        except (TypeError, ValueError):
+            raw_action = 0.0
+        return max(-1.0, min(1.0, raw_action))
+
+    def _action_direction(self, raw_action: float) -> str:
+        if raw_action > 0.1:
+            return "BUY"
+        if raw_action < -0.1:
+            return "SELL"
+        return "HOLD"
+
+    def _dynamic_risk_pct(self, raw_action: float) -> float:
+        action_magnitude = abs(raw_action)
+        dynamic_risk_pct = action_magnitude * float(self.env_cfg.max_risk_per_trade)
+        if self._action_direction(raw_action) != "HOLD":
+            dynamic_risk_pct = max(dynamic_risk_pct, float(self.env_cfg.min_risk_per_trade))
+        return dynamic_risk_pct
 
     def _paper_close_position(self, price: float) -> dict:
         if self.paper_position == 0 or self.paper_volume <= 0:
             return {"closed": False, "reason": "no_open_position"}
 
-        pnl = (price - self.paper_entry_price) * self.paper_position * self.paper_volume
+        gross_pnl = (price - self.paper_entry_price) * self.paper_position * self._trade_units(self.paper_volume)
+        close_cost = self._estimate_cost(price, self.paper_volume)
+        pnl = gross_pnl - close_cost
+        self.paper_balance += pnl
         snapshot = {
             "closed": True,
             "side": self.paper_position,
             "entry_price": self.paper_entry_price,
             "exit_price": price,
             "volume": self.paper_volume,
+            "close_cost": close_cost,
+            "gross_pnl": gross_pnl,
             "pnl": pnl,
         }
         self.paper_position = 0
         self.paper_entry_price = 0.0
         self.paper_volume = 0.0
+        self.paper_entry_opened_at = None
         return snapshot
 
     def _paper_check_stop_take(self) -> dict | None:
@@ -271,7 +358,9 @@ class HyperliquidExecutor:
             if self.paper_position != 0 and self.paper_entry_price > 0:
                 current_price = self._get_mid_price()
                 unrealized_pnl = (
-                    (current_price - self.paper_entry_price) * self.paper_position * self.paper_volume
+                    (current_price - self.paper_entry_price)
+                    * self.paper_position
+                    * self._trade_units(self.paper_volume)
                 )
             return {
                 "symbol": symbol,
@@ -279,6 +368,7 @@ class HyperliquidExecutor:
                 "volume": self.paper_volume,
                 "avg_entry_price": self.paper_entry_price,
                 "unrealized_pnl": unrealized_pnl,
+                "time_in_position": self._position_bars(self.paper_entry_opened_at),
             }
 
         if not self.address:
@@ -308,14 +398,17 @@ class HyperliquidExecutor:
                 "volume": abs(szi),
                 "avg_entry_price": float(entry_px) if entry_px is not None else 0.0,
                 "unrealized_pnl": float(position.get("unrealizedPnl", 0.0)),
+                "time_in_position": self._position_bars(self.live_entry_opened_at),
             }
 
+        self.live_entry_opened_at = None
         return {
             "symbol": symbol,
             "side": 0,
             "volume": 0.0,
             "avg_entry_price": 0.0,
             "unrealized_pnl": 0.0,
+            "time_in_position": 0.0,
         }
 
     def _response_ok(self, response) -> bool:
@@ -342,7 +435,7 @@ class HyperliquidExecutor:
                 "ok": False,
                 "mode": self.exec_cfg.mode,
                 "timestamp": timestamp,
-                "error": "Exchange da Hyperliquid não inicializado para encerrar posição.",
+                "error": "Hyperliquid exchange is not initialized for close.",
             }
 
         response = self.exchange.market_close(
@@ -352,6 +445,8 @@ class HyperliquidExecutor:
             slippage=float(self.slippage_pct),
         )
         self.last_order_ts = time.time()
+        if self._response_ok(response):
+            self.live_entry_opened_at = None
         return {
             "ok": self._response_ok(response),
             "mode": self.exec_cfg.mode,
@@ -362,30 +457,34 @@ class HyperliquidExecutor:
         }
 
     def execute(self, decision: ExecutionDecision) -> dict:
-        """Executa decisão do agente.
-
-        action: 0=HOLD, 1=BUY, 2=SELL
-        """
+        """Execute a continuous action in [-1, 1]."""
         timestamp = datetime.now(timezone.utc).isoformat()
+        raw_action = self._coerce_raw_action(decision.action)
+        trade_direction = self._action_direction(raw_action)
+        dynamic_risk_pct = self._dynamic_risk_pct(raw_action)
 
         if self.exec_cfg.mode.lower() == "paper":
             stop_take_event = self._paper_check_stop_take()
-            paper_volume = float(self.exec_cfg.lot)
             sizing = None
-            if self.exec_cfg.use_dynamic_position_sizing:
+            paper_volume = float(self.env_cfg.fixed_trade_volume)
+            if not self.env_cfg.use_fixed_trade_volume and trade_direction != "HOLD":
                 sizing = self.calculate_order_volume(
-                    balance=float(self.exec_cfg.validation_balance),
-                    stop_loss_pct=self.stop_loss_pct,
+                    balance=float(self.paper_balance),
+                    dynamic_risk_pct=dynamic_risk_pct,
                     defensive=False,
                 )
                 paper_volume = float(sizing["adjusted_volume"])
 
             opened = False
             open_price = None
-            if self.paper_position == 0 and decision.action in (1, 2):
-                self.paper_position = 1 if decision.action == 1 else -1
+            entry_cost = 0.0
+            if self.paper_position == 0 and trade_direction in ("BUY", "SELL") and paper_volume > 0:
+                self.paper_position = 1 if trade_direction == "BUY" else -1
                 self.paper_entry_price = self._get_mid_price()
                 self.paper_volume = paper_volume
+                self.paper_entry_opened_at = time.time()
+                entry_cost = self._estimate_cost(self.paper_entry_price, self.paper_volume)
+                self.paper_balance -= entry_cost
                 opened = True
                 open_price = self.paper_entry_price
 
@@ -393,12 +492,16 @@ class HyperliquidExecutor:
                 "ok": True,
                 "mode": "paper",
                 "timestamp": timestamp,
-                "action": decision.action,
+                "action": raw_action,
+                "trade_direction": trade_direction,
+                "dynamic_risk_pct": dynamic_risk_pct,
                 "reason": decision.reason,
                 "volume": paper_volume,
                 "sizing": sizing,
+                "entry_cost": entry_cost,
                 "opened_position": opened,
                 "open_price": open_price,
+                "paper_balance": self.paper_balance,
                 "position_snapshot": self.get_position_snapshot(),
                 "stop_take_event": stop_take_event,
             }
@@ -408,7 +511,10 @@ class HyperliquidExecutor:
                 "ok": False,
                 "mode": self.exec_cfg.mode,
                 "timestamp": timestamp,
-                "error": "allow_live_trading=false. Execução real bloqueada por segurança.",
+                "action": raw_action,
+                "trade_direction": trade_direction,
+                "dynamic_risk_pct": dynamic_risk_pct,
+                "error": "allow_live_trading=false. Real execution is blocked.",
             }
 
         if self.exchange is None:
@@ -416,7 +522,10 @@ class HyperliquidExecutor:
                 "ok": False,
                 "mode": self.exec_cfg.mode,
                 "timestamp": timestamp,
-                "error": "HL_PRIVATE_KEY ausente ou executor da Hyperliquid não inicializado.",
+                "action": raw_action,
+                "trade_direction": trade_direction,
+                "dynamic_risk_pct": dynamic_risk_pct,
+                "error": "HL_PRIVATE_KEY missing or Hyperliquid executor not initialized.",
             }
 
         stop_take_result = self._maybe_close_live_position(timestamp)
@@ -428,7 +537,10 @@ class HyperliquidExecutor:
                 "ok": False,
                 "mode": self.exec_cfg.mode,
                 "timestamp": timestamp,
-                "error": "Aguardando cooldown entre ordens.",
+                "action": raw_action,
+                "trade_direction": trade_direction,
+                "dynamic_risk_pct": dynamic_risk_pct,
+                "error": "Waiting for cooldown between orders.",
             }
 
         current_snapshot = self.get_position_snapshot()
@@ -437,50 +549,76 @@ class HyperliquidExecutor:
                 "ok": True,
                 "mode": self.exec_cfg.mode,
                 "timestamp": timestamp,
-                "message": "Posição já aberta; aguardando stop/take gerenciado pelo bot.",
+                "action": raw_action,
+                "trade_direction": trade_direction,
+                "dynamic_risk_pct": dynamic_risk_pct,
+                "message": "Position already open; waiting for stop/take handling.",
                 "position_snapshot": current_snapshot,
             }
 
-        target_side = {0: 0, 1: 1, 2: -1}[decision.action]
-        if target_side == 0:
+        if trade_direction == "HOLD":
             return {
                 "ok": True,
                 "mode": self.exec_cfg.mode,
                 "timestamp": timestamp,
-                "message": "Sem sinal de entrada nesta barra.",
+                "action": raw_action,
+                "trade_direction": trade_direction,
+                "dynamic_risk_pct": dynamic_risk_pct,
+                "message": "No entry signal on this bar.",
             }
 
         risk_state = self.get_account_risk_state()
-        sizing = self.calculate_order_volume(
-            balance=risk_state["balance"],
-            stop_loss_pct=self.stop_loss_pct,
-            defensive=bool(risk_state["defensive"]),
-        )
-        if self.exec_cfg.use_dynamic_position_sizing and bool(sizing.get("exceeds_target_risk")):
+        price = self._get_mid_price()
+        if self.env_cfg.use_fixed_trade_volume:
+            spec = self.get_symbol_trading_spec()
+            volume = self._round_volume_to_step(
+                float(self.env_cfg.fixed_trade_volume),
+                spec.volume_min,
+                spec.volume_step,
+            )
+            if spec.volume_max > 0:
+                volume = min(volume, spec.volume_max)
+            sizing = None
+        else:
+            sizing = self.calculate_order_volume(
+                balance=risk_state["balance"],
+                dynamic_risk_pct=dynamic_risk_pct,
+                price=price,
+                defensive=bool(risk_state["defensive"]),
+            )
+            volume = float(sizing["adjusted_volume"])
+
+        if volume <= 0:
             return {
                 "ok": False,
                 "mode": self.exec_cfg.mode,
                 "timestamp": timestamp,
-                "error": "Lote mínimo configurado excede o risco alvo.",
+                "action": raw_action,
+                "trade_direction": trade_direction,
+                "dynamic_risk_pct": dynamic_risk_pct,
+                "error": "Calculated entry volume is invalid.",
                 "sizing": sizing,
                 "risk_state": risk_state,
             }
 
-        volume = float(sizing["adjusted_volume"]) if self.exec_cfg.use_dynamic_position_sizing else float(self.exec_cfg.lot)
-        price = self._get_mid_price()
         response = self.exchange.market_open(
             str(self.hl_cfg.symbol),
-            target_side == 1,
+            trade_direction == "BUY",
             volume,
             px=price,
             slippage=float(self.slippage_pct),
         )
         self.last_order_ts = time.time()
+        if self._response_ok(response):
+            self.live_entry_opened_at = time.time()
 
         return {
             "ok": self._response_ok(response),
             "mode": self.exec_cfg.mode,
             "timestamp": timestamp,
+            "action": raw_action,
+            "trade_direction": trade_direction,
+            "dynamic_risk_pct": dynamic_risk_pct,
             "volume": volume,
             "sizing": sizing,
             "risk_state": risk_state,
