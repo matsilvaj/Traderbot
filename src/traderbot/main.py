@@ -1175,9 +1175,51 @@ def smoke_hyperliquid_pipeline(
     return payload
 
 
+def apply_cli_runtime_overrides(cfg: AppConfig, args, logger) -> AppConfig:
+    overrides = []
+    if getattr(args, "network_override", None):
+        cfg.hyperliquid.network = str(args.network_override).lower().strip()
+        overrides.append(f"network={cfg.hyperliquid.network}")
+    if getattr(args, "execution_mode_override", None):
+        cfg.execution.execution_mode = str(args.execution_mode_override).lower().strip()
+        overrides.append(f"execution_mode={cfg.execution.execution_mode}")
+    if getattr(args, "allow_live_trading", False):
+        cfg.execution.allow_live_trading = True
+        overrides.append("allow_live_trading=true")
+    if getattr(args, "order_slippage_override", None) is not None:
+        cfg.execution.order_slippage = float(args.order_slippage_override)
+        overrides.append(f"order_slippage={cfg.execution.order_slippage}")
+    if overrides:
+        logger.info("Overrides de runtime aplicados via CLI: %s", ", ".join(overrides))
+    return cfg
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Traderbot RL + Hyperliquid")
     parser.add_argument("--config", type=str, default="config.yaml", help="Caminho do arquivo de configuração")
+    parser.add_argument(
+        "--network-override",
+        choices=["mainnet", "testnet"],
+        default=None,
+        help="Override da rede Hyperliquid sem editar o config.yaml",
+    )
+    parser.add_argument(
+        "--execution-mode-override",
+        choices=["paper_local", "exchange"],
+        default=None,
+        help="Override do execution_mode sem editar o config.yaml",
+    )
+    parser.add_argument(
+        "--allow-live-trading",
+        action="store_true",
+        help="Ativa allow_live_trading só para esta execução",
+    )
+    parser.add_argument(
+        "--order-slippage-override",
+        type=float,
+        default=None,
+        help="Override do order_slippage só para esta execução",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1235,6 +1277,7 @@ def main():
     ensure_directories(cfg)
 
     logger = setup_logger(cfg.app_name, cfg.paths.logs_dir)
+    cfg = apply_cli_runtime_overrides(cfg, args, logger)
     logger.info("Iniciando pipeline com comando: %s", args.command)
 
     if args.command == "train":
