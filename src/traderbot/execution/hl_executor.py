@@ -621,10 +621,7 @@ class HyperliquidExecutor:
 
     def _dynamic_risk_pct(self, raw_action: float) -> float:
         action_magnitude = abs(raw_action)
-        dynamic_risk_pct = action_magnitude * float(self.env_cfg.max_risk_per_trade)
-        if self._action_direction(raw_action) != "HOLD":
-            dynamic_risk_pct = max(dynamic_risk_pct, float(self.env_cfg.min_risk_per_trade))
-        return dynamic_risk_pct
+        return action_magnitude * float(self.env_cfg.max_risk_per_trade)
 
     @staticmethod
     def _is_opposite_signal(trade_direction: str, side: int) -> bool:

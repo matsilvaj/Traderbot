@@ -49,7 +49,6 @@ class EnvironmentConfig:
     initial_balance: float = 250.0
     simulation_initial_balance: Optional[float] = None
     max_risk_per_trade: float = 0.01
-    min_risk_per_trade: float = 0.001
     action_hold_threshold: float = 0.65
     regime_min_abs_dist_ema_240: float = 0.025
     regime_min_vol_regime_z: float = 0.3
@@ -181,6 +180,7 @@ def _deep_update(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any
 
 def _build_config(raw: dict[str, Any]) -> AppConfig:
     execution_raw = dict(raw.get("execution", {}))
+    environment_raw = dict(raw.get("environment", {}))
     if "execution_mode" not in execution_raw and "mode" in execution_raw:
         legacy_mode = str(execution_raw.get("mode", "")).strip().lower()
         if legacy_mode == "paper":
@@ -190,6 +190,7 @@ def _build_config(raw: dict[str, Any]) -> AppConfig:
         else:
             execution_raw["execution_mode"] = legacy_mode
     execution_raw.pop("mode", None)
+    environment_raw.pop("min_risk_per_trade", None)
 
     return AppConfig(
         app_name=raw.get("app_name", "traderbot-rl"),
@@ -197,7 +198,7 @@ def _build_config(raw: dict[str, Any]) -> AppConfig:
         hyperliquid=HyperliquidConfig(**raw.get("hyperliquid", {})),
         data=DataConfig(**raw.get("data", {})),
         features=FeatureConfig(**raw.get("features", {})),
-        environment=EnvironmentConfig(**raw.get("environment", {})),
+        environment=EnvironmentConfig(**environment_raw),
         ablation=AblationConfig(**raw.get("ablation", {})),
         training=TrainingConfig(**raw.get("training", {})),
         execution=ExecutionConfig(**execution_raw),

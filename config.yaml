@@ -32,7 +32,6 @@ environment:
   initial_balance: 250.0
   simulation_initial_balance: 250.0
   max_risk_per_trade: 0.005
-  min_risk_per_trade: 0.001
   action_hold_threshold: 0.65
   regime_min_abs_dist_ema_240: 0.025
   regime_min_vol_regime_z: 0.3

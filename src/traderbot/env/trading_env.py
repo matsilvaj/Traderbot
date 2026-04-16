@@ -415,9 +415,6 @@ class TradingEnv(gym.Env):
         action_magnitude = abs(raw_action)
         dynamic_risk_pct = action_magnitude * float(self.cfg.max_risk_per_trade)
 
-        if trade_direction != "HOLD":
-            dynamic_risk_pct = max(dynamic_risk_pct, float(self.cfg.min_risk_per_trade))
-
         current_price = self._price(self.current_step)
         starting_cooldown = self.cooldown_steps_remaining
         position_at_step_start = int(self.position)

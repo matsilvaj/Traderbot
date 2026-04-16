@@ -172,10 +172,6 @@ class SettingsDialog(QDialog):
         self.decision_mode_label.setObjectName("DialogValue")
         form.addRow("Modelo de execucao", self.decision_mode_label)
 
-        self.risk_min_label = QLabel(_pct(cfg.environment.min_risk_per_trade))
-        self.risk_min_label.setObjectName("DialogValue")
-        form.addRow("Risco minimo", self.risk_min_label)
-
         self.risk_max_label = QLabel(_pct(cfg.environment.max_risk_per_trade))
         self.risk_max_label.setObjectName("DialogValue")
         form.addRow("Risco maximo", self.risk_max_label)
