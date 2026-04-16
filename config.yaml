@@ -5,7 +5,7 @@ paths:
   results_dir: results
   logs_dir: logs
 
-# NOVA SEÇÃO (Substitui a seção mt5)
+# Configuracao Hyperliquid
 hyperliquid:
   enabled: true
   wallet_address: null  # Deixe null para ler do .env

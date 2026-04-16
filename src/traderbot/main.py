@@ -1238,7 +1238,6 @@ def parse_args():
     p_run = sub.add_parser("run", help="Roda loop de inferência e execução (paper/live)")
     p_run.add_argument("--model-path", type=str, default=None, help="Caminho do modelo .zip")
     sub.add_parser("check-hyperliquid", help="Valida conexão Hyperliquid (wallet/rede/símbolo)")
-    sub.add_parser("check-mt5", help="Alias legado do check-hyperliquid")
     p_smoke = sub.add_parser(
         "smoke-hyperliquid",
         help="Abre e fecha uma ordem mínima na Hyperliquid para validar execução operacional",
@@ -1297,7 +1296,7 @@ def main():
         backtest_pipeline(cfg, logger, args.model_path)
     elif args.command == "run":
         run_execution_pipeline(cfg, logger, args.model_path)
-    elif args.command in {"check-hyperliquid", "check-mt5"}:
+    elif args.command == "check-hyperliquid":
         check_hyperliquid_pipeline(cfg, logger)
     elif args.command == "smoke-hyperliquid":
         smoke_hyperliquid_pipeline(

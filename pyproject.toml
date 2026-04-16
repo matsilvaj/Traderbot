@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "traderbot-rl"
 version = "0.1.0"
-description = "Robô de trading com RL (PPO) integrado ao MetaTrader 5"
+description = "Robo de trading com RL (PPO) integrado a Hyperliquid"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,8 +14,9 @@ dependencies = [
   "gymnasium>=0.29.1",
   "stable-baselines3>=2.3.0",
   "torch>=2.2.0",
-  "MetaTrader5>=5.0.45",
   "ccxt>=4.4.0",
+  "eth_account",
+  "git+https://github.com/hyperliquid-dex/hyperliquid-python-sdk.git",
   "PyYAML>=6.0.1",
   "python-dotenv>=1.0.1"
 ]

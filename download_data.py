@@ -11,32 +11,31 @@ try:
     import ccxt
 except ImportError as exc:  # pragma: no cover
     raise SystemExit(
-        "A biblioteca 'ccxt' não está instalada. Adicione-a ao ambiente antes de rodar este script."
+        "A biblioteca 'ccxt' nao esta instalada. Adicione-a ao ambiente antes de rodar este script."
     ) from exc
 
 
 TIMEFRAME_MS = {
     "1m": 60_000,
-    "5m": 300_000,
     "1h": 3_600_000,
 }
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Baixa histórico M1 da Binance em CSV.")
+    parser = argparse.ArgumentParser(description="Baixa historico OHLCV da Binance em CSV.")
     parser.add_argument("--symbol", default="BTC/USDT", help="Par a ser baixado. Ex: BTC/USDT")
     parser.add_argument(
         "--market",
         choices=["spot", "linear"],
         default="spot",
-        help="Spot da Binance ou futuros perpétuos lineares (USDT-M).",
+        help="Spot da Binance ou futuros perpetuos lineares (USDT-M).",
     )
-    parser.add_argument("--timeframe", default="1m", help="Timeframe do OHLCV. Ex: 1m")
+    parser.add_argument("--timeframe", default="1h", help="Timeframe do OHLCV. Ex: 1h")
     parser.add_argument(
         "--years",
         type=float,
         default=3.0,
-        help="Quantidade aproximada de anos para trás a partir de agora.",
+        help="Quantidade aproximada de anos para tras a partir de agora.",
     )
     parser.add_argument(
         "--since",
@@ -47,14 +46,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=str,
-        default="data/binance_btcusdt_m1.csv",
-        help="Arquivo CSV de saída.",
+        default="data/binance_btcusdt_h1.csv",
+        help="Arquivo CSV de saida.",
     )
     parser.add_argument(
         "--limit",
         type=int,
         default=1000,
-        help="Limite por requisição. 1000 é um valor seguro para Binance.",
+        help="Limite por requisicao. 1000 e um valor seguro para Binance.",
     )
     return parser.parse_args()
 
@@ -80,7 +79,7 @@ def resolve_since_ms(args: argparse.Namespace) -> int:
 
 def fetch_all_ohlcv(exchange, symbol: str, timeframe: str, since_ms: int, limit: int) -> pd.DataFrame:
     if timeframe not in TIMEFRAME_MS:
-        raise ValueError(f"Timeframe não suportado neste script: {timeframe}")
+        raise ValueError(f"Timeframe nao suportado neste script: {timeframe}")
 
     step_ms = TIMEFRAME_MS[timeframe]
     now_ms = exchange.milliseconds()
@@ -105,7 +104,7 @@ def fetch_all_ohlcv(exchange, symbol: str, timeframe: str, since_ms: int, limit:
         next_since = last_ts + step_ms
 
         print(
-            f"Baixados {len(rows)} candles até {datetime.fromtimestamp(last_ts / 1000, tz=timezone.utc).isoformat()}",
+            f"Baixados {len(rows)} candles ate {datetime.fromtimestamp(last_ts / 1000, tz=timezone.utc).isoformat()}",
             flush=True,
         )
 
@@ -136,7 +135,7 @@ def main() -> None:
     try:
         markets = exchange.load_markets()
         if args.symbol not in markets:
-            raise ValueError(f"Símbolo '{args.symbol}' não encontrado na Binance ({args.market}).")
+            raise ValueError(f"Simbolo '{args.symbol}' nao encontrado na Binance ({args.market}).")
 
         df = fetch_all_ohlcv(
             exchange=exchange,
