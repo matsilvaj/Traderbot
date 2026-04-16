@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStyle,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -128,7 +129,12 @@ class DashboardState:
     blocker_label: str = "Sem bloqueio"
     last_decision: str = "Sem decisao no momento."
     last_update_label: str = "--"
+    last_valid_check_label: str = "--"
     network_label: str = "TESTNET"
+    symbol_label: str = "BTC"
+    timeframe_label: str = "1h"
+    connection_label: str = "offline"
+    execution_mode_label: str = "exchange"
     position_label: str = "FLAT"
     position_status: str = "Sem sinal ativo"
     position_size_label: str = "--"
@@ -138,6 +144,18 @@ class DashboardState:
     pnl_label: str = "--"
     pnl_style: str = "muted"
     last_raw_detail: str = ""
+
+
+@dataclass
+class OperationalHealthState:
+    bot_running: bool = False
+    last_healthcheck_at: datetime | None = None
+    last_successful_healthcheck_at: datetime | None = None
+    connection_ok: bool = False
+    executor_alive: bool = False
+    last_check_execution_ok: bool | None = None
+    status: str = "offline"
+    reason: str = "startup"
 
 
 def _refresh_widget_style(widget: QWidget) -> None:
@@ -154,7 +172,15 @@ def _set_widget_property(widget: QWidget, name: str, value: Any) -> None:
 def _configure_dynamic_label(label: QLabel) -> None:
     label.setTextFormat(Qt.PlainText)
     label.setWordWrap(True)
-    label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+    label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+    _fit_label_height(label)
+
+
+def _fit_label_height(label: QLabel) -> None:
+    label.updateGeometry()
+    hint_height = label.sizeHint().height()
+    if hint_height > 0:
+        label.setMinimumHeight(hint_height)
 
 
 class TranslationSignals(QObject):
@@ -175,20 +201,39 @@ class TranslationTask(QRunnable):
 
 
 class MetricTile(QFrame):
-    def __init__(self, label: str):
+    def __init__(
+        self,
+        label: str,
+        *,
+        compact: bool = False,
+        wrap_value: bool = False,
+        min_height: int = 136,
+    ):
         super().__init__()
         self.setObjectName("card")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        self.setMinimumHeight(min_height)
+        self._compact = compact
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
 
         self.label = QLabel(label)
         self.label.setObjectName("metaLabel")
+        self.label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self.label)
 
         self.value = QLabel("--")
         self.value.setObjectName("metricValue")
         self.value.setProperty("tone", "default")
+        if compact:
+            self.value.setProperty("sizeVariant", "compact")
+        elif wrap_value:
+            self.value.setProperty("sizeVariant", "body")
+        else:
+            self.value.setProperty("sizeVariant", "default")
+        self.value.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        self.value.setWordWrap(True)
         layout.addWidget(self.value)
 
         self.note = QLabel("")
@@ -199,9 +244,11 @@ class MetricTile(QFrame):
 
     def update_tile(self, value: str, *, note: str | None = None, tone: str = "default") -> None:
         self.value.setText(value)
+        _fit_label_height(self.value)
         _set_widget_property(self.value, "tone", tone)
         if note:
             self.note.setText(note)
+            _fit_label_height(self.note)
             self.note.show()
         else:
             self.note.hide()
@@ -222,12 +269,12 @@ class EventDetailsDialog(QDialog):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(18)
 
-        title = QLabel(self.summary.message)
+        title = QLabel(self.summary.message_human)
         title.setObjectName("dialogTitle")
         _configure_dynamic_label(title)
         root.addWidget(title)
 
-        meta = QLabel(f"{self.summary.severity.upper()}  {self.summary.occurred_at.strftime('%H:%M:%S')}")
+        meta = QLabel(f"{self.summary.severity.upper()}  {self.summary.timestamp.strftime('%H:%M:%S')}")
         meta.setObjectName("subtleText")
         root.addWidget(meta)
 
@@ -248,7 +295,7 @@ class EventDetailsDialog(QDialog):
         raw_box = QPlainTextEdit()
         raw_box.setObjectName("technicalLog")
         raw_box.setReadOnly(True)
-        raw_box.setPlainText(self.summary.raw_detail or "Sem log tecnico disponivel.")
+        raw_box.setPlainText(self.summary.message_raw or "Sem log tecnico disponivel.")
         root.addWidget(raw_box, 1)
 
         footer = QHBoxLayout()
@@ -267,13 +314,14 @@ class NotificationItemWidget(QFrame):
         self.count = 1
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("event")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self._build_ui()
         self.apply_summary(summary)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
 
         top = QHBoxLayout()
         top.setSpacing(10)
@@ -302,6 +350,7 @@ class NotificationItemWidget(QFrame):
         self.message_label = QLabel("")
         self.message_label.setObjectName("notificationMessage")
         _configure_dynamic_label(self.message_label)
+        self.message_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         layout.addWidget(self.message_label)
         self.setToolTip("Ver log tecnico")
 
@@ -309,10 +358,11 @@ class NotificationItemWidget(QFrame):
         self.summary = summary
         self.dot_label.setText("•")
         self.severity_badge.setText(summary.severity.upper())
-        self.message_label.setText(summary.message)
+        self.message_label.setText(summary.message_human)
+        _fit_label_height(self.message_label)
         self.message_label.updateGeometry()
         self.updateGeometry()
-        self.time_label.setText(summary.occurred_at.strftime("%H:%M:%S"))
+        self.time_label.setText(summary.timestamp.strftime("%H:%M:%S"))
         _set_widget_property(self, "severity", summary.severity)
         _set_widget_property(self.severity_badge, "severity", summary.severity)
         _set_widget_property(self.dot_label, "severity", summary.severity)
@@ -493,9 +543,9 @@ class TraderBotLauncher(QMainWindow):
         self._notification_order: list[str] = []
         self._thread_pool = QThreadPool.globalInstance()
         self.state = DashboardState(network_label=self._current_mode().label.upper())
-        self.last_check_at: datetime | None = None
-        self.last_runtime_seen_at: datetime | None = None
+        self.health_state = OperationalHealthState()
         self.last_connection_signature: tuple[Any, ...] | None = None
+        self.runtime_stop_requested = False
 
         self.log_translator = OpenAILogTranslator(self.cfg)
 
@@ -508,7 +558,7 @@ class TraderBotLauncher(QMainWindow):
 
         self._build_ui()
         self._hydrate_static_snapshot()
-        self._set_online(False)
+        self._apply_health_status("offline", "startup", emit_event=False)
         self._refresh_dashboard()
         self._update_controls()
 
@@ -554,10 +604,6 @@ class TraderBotLauncher(QMainWindow):
         self.mode_badge = QLabel(self._current_mode().label.upper())
         self.mode_badge.setObjectName("ModeBadge")
         left.addWidget(self.mode_badge, 0, Qt.AlignLeft)
-
-        self.last_check_chip = QLabel("sem check")
-        self.last_check_chip.setObjectName("SubtleChip")
-        left.addWidget(self.last_check_chip, 0, Qt.AlignLeft)
         layout.addLayout(left, 1)
 
         center = QFrame()
@@ -601,11 +647,26 @@ class TraderBotLauncher(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(18)
 
-        hero = QFrame()
-        hero.setObjectName("HeroCard")
-        hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(22, 22, 22, 22)
-        hero_layout.setSpacing(18)
+        main_card = QFrame()
+        main_card.setObjectName("HeroCard")
+        main_layout = QVBoxLayout(main_card)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        self.main_tabs = QTabWidget()
+        self.main_tabs.setObjectName("MainTabs")
+        self.main_tabs.addTab(self._build_dashboard_tab(), "Dashboard")
+        self.main_tabs.addTab(self._build_details_tab(), "Detalhes")
+        main_layout.addWidget(self.main_tabs)
+
+        layout.addWidget(main_card, 1)
+        return container
+
+    def _build_dashboard_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(18)
 
         hero_top = QHBoxLayout()
         hero_top.setSpacing(12)
@@ -621,15 +682,6 @@ class TraderBotLauncher(QMainWindow):
         self.state_message.setObjectName("HeroTitle")
         _configure_dynamic_label(self.state_message)
         hero_left.addWidget(self.state_message)
-
-        self.last_decision_label = QLabel("Sem decisao no momento.")
-        self.last_decision_label.setObjectName("HeroHint")
-        _configure_dynamic_label(self.last_decision_label)
-        hero_left.addWidget(self.last_decision_label)
-
-        self.block_reason_label = QLabel("Sem bloqueio")
-        self.block_reason_label.setObjectName("BlockChip")
-        hero_left.addWidget(self.block_reason_label, 0, Qt.AlignLeft)
 
         hero_top.addLayout(hero_left, 1)
 
@@ -653,7 +705,7 @@ class TraderBotLauncher(QMainWindow):
         actions.addStretch(1)
 
         hero_top.addLayout(actions)
-        hero_layout.addLayout(hero_top)
+        layout.addLayout(hero_top)
 
         hero_bottom = QHBoxLayout()
         hero_bottom.setSpacing(18)
@@ -665,30 +717,35 @@ class TraderBotLauncher(QMainWindow):
         balance_stack.addWidget(self.balance_caption)
         self.balance_inline = QLabel("--")
         self.balance_inline.setObjectName("BalanceValue")
+        _configure_dynamic_label(self.balance_inline)
         balance_stack.addWidget(self.balance_inline)
         hero_bottom.addLayout(balance_stack)
         hero_bottom.addStretch(1)
-        hero_layout.addLayout(hero_bottom)
-
-        layout.addWidget(hero)
+        layout.addLayout(hero_bottom)
 
         grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(16)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
 
-        self.regime_tile = MetricTile("Regime")
-        self.signal_tile = MetricTile("Sinal")
-        self.direction_tile = MetricTile("Ensemble")
-        self.strength_tile = MetricTile("Forca")
-        self.price_tile = MetricTile("Preco de referencia")
-        self.risk_tile = MetricTile("Risco efetivo")
+        self.signal_tile = MetricTile("Sinal", compact=True)
+        self.reason_tile = MetricTile("Motivo", wrap_value=True, min_height=168)
+        self.price_tile = MetricTile("Preco de referencia", compact=True)
+        self.risk_tile = MetricTile("Risco efetivo", compact=True)
+        self.position_tile = MetricTile("Posicao atual", compact=True)
+        self.pnl_tile = MetricTile("PnL aberto", compact=True)
 
-        grid.addWidget(self.regime_tile, 0, 0)
-        grid.addWidget(self.signal_tile, 0, 1)
-        grid.addWidget(self.direction_tile, 0, 2)
-        grid.addWidget(self.strength_tile, 1, 0)
-        grid.addWidget(self.price_tile, 1, 1)
-        grid.addWidget(self.risk_tile, 1, 2)
+        grid.addWidget(self.signal_tile, 0, 0)
+        grid.addWidget(self.reason_tile, 0, 1)
+        grid.addWidget(self.price_tile, 0, 2)
+        grid.addWidget(self.risk_tile, 1, 0)
+        grid.addWidget(self.position_tile, 1, 1)
+        grid.addWidget(self.pnl_tile, 1, 2)
         layout.addLayout(grid)
 
         position = QFrame()
@@ -721,6 +778,7 @@ class TraderBotLauncher(QMainWindow):
         pnl_box.addWidget(pnl_label)
         self.pnl_value = QLabel("--")
         self.pnl_value.setObjectName("PnlValue")
+        _configure_dynamic_label(self.pnl_value)
         pnl_box.addWidget(self.pnl_value)
         position_top.addLayout(pnl_box)
 
@@ -731,14 +789,19 @@ class TraderBotLauncher(QMainWindow):
         size_box.addWidget(size_label)
         self.position_size_value = QLabel("--")
         self.position_size_value.setObjectName("PositionNotional")
+        _configure_dynamic_label(self.position_size_value)
         size_box.addWidget(self.position_size_value)
         position_top.addLayout(size_box)
 
         position_layout.addLayout(position_top)
 
         levels = QGridLayout()
+        levels.setContentsMargins(0, 0, 0, 0)
         levels.setHorizontalSpacing(16)
         levels.setVerticalSpacing(14)
+        levels.setColumnStretch(0, 1)
+        levels.setColumnStretch(1, 1)
+        levels.setColumnStretch(2, 1)
 
         self.entry_value = self._build_level_box(levels, 0, "Entrada")
         self.tp_value = self._build_level_box(levels, 1, "Take profit")
@@ -747,7 +810,58 @@ class TraderBotLauncher(QMainWindow):
 
         layout.addWidget(position, 1)
 
-        return container
+        return tab
+
+    def _build_details_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(18)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(16)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+
+        self.connection_tile = MetricTile("Conexao", compact=True, min_height=124)
+        self.heartbeat_tile = MetricTile("Ultimo check valido", compact=True, min_height=124)
+        grid.addWidget(self.connection_tile, 0, 0)
+        grid.addWidget(self.heartbeat_tile, 0, 1)
+        layout.addLayout(grid)
+
+        context_card = QFrame()
+        context_card.setObjectName("PositionCard")
+        context_card.setMinimumHeight(200)
+        context_layout = QVBoxLayout(context_card)
+        context_layout.setContentsMargins(22, 22, 22, 22)
+        context_layout.setSpacing(16)
+
+        self.details_decision_label = QLabel("Ultima decisao: --")
+        self.details_decision_label.setObjectName("PositionStatus")
+        _configure_dynamic_label(self.details_decision_label)
+        context_layout.addWidget(self.details_decision_label)
+
+        self.details_context_label = QLabel("Contexto: --")
+        self.details_context_label.setObjectName("HeroHint")
+        _configure_dynamic_label(self.details_context_label)
+        context_layout.addWidget(self.details_context_label)
+
+        self.details_signal_label = QLabel("Ultimo sinal: --")
+        self.details_signal_label.setObjectName("HeroHint")
+        _configure_dynamic_label(self.details_signal_label)
+        context_layout.addWidget(self.details_signal_label)
+
+        self.details_block_label = QLabel("Bloqueio atual: sem bloqueio")
+        self.details_block_label.setObjectName("HeroHint")
+        _configure_dynamic_label(self.details_block_label)
+        context_layout.addWidget(self.details_block_label)
+
+        layout.addWidget(context_card, 1)
+
+        return tab
 
     def _build_level_box(self, layout: QGridLayout, column: int, title: str) -> QLabel:
         wrapper = QFrame()
@@ -762,6 +876,7 @@ class TraderBotLauncher(QMainWindow):
 
         value = QLabel("--")
         value.setObjectName("LevelValue")
+        _configure_dynamic_label(value)
         inner.addWidget(value)
         layout.addWidget(wrapper, 0, column)
         return value
@@ -781,15 +896,7 @@ class TraderBotLauncher(QMainWindow):
         title = QLabel("Eventos")
         title.setObjectName("PanelTitle")
         title_box.addWidget(title)
-        self.notification_hint = QLabel("Somente o que realmente importa para operar.")
-        self.notification_hint.setObjectName("PanelHint")
-        _configure_dynamic_label(self.notification_hint)
-        title_box.addWidget(self.notification_hint)
         head.addLayout(title_box, 1)
-
-        self.notification_status = QLabel("OpenAI: local")
-        self.notification_status.setObjectName("SubtleChip")
-        head.addWidget(self.notification_status, 0, Qt.AlignTop)
         layout.addLayout(head)
 
         scroll = QScrollArea()
@@ -808,13 +915,6 @@ class TraderBotLauncher(QMainWindow):
         return panel
 
     def _hydrate_static_snapshot(self) -> None:
-        snapshot = self.log_translator.status_snapshot()
-        if snapshot["client_ready"]:
-            self.notification_status.setText(f"OpenAI: {snapshot['model']}")
-        elif snapshot["enabled"] and not snapshot["api_key_present"]:
-            self.notification_status.setText("OpenAI: sem chave")
-        else:
-            self.notification_status.setText("OpenAI: local")
         self._sync_mode_buttons()
 
     def _sync_mode_buttons(self) -> None:
@@ -845,25 +945,59 @@ class TraderBotLauncher(QMainWindow):
             args.append("--allow-live-trading")
         return args
 
+    def _new_event(
+        self,
+        *,
+        source: str,
+        event_type: str,
+        raw_line: str,
+        message: str = "",
+        payload: dict[str, Any] | None = None,
+        severity: str = "info",
+        event_code: str | None = None,
+    ) -> LauncherEvent:
+        metadata = dict(payload or {})
+        network = str(metadata.get("network") or self._current_mode().network)
+        symbol = str(metadata.get("symbol") or self.cfg.hyperliquid.symbol)
+        timeframe = str(metadata.get("timeframe") or self.cfg.hyperliquid.timeframe)
+        metadata.setdefault("network", network)
+        metadata.setdefault("symbol", symbol)
+        metadata.setdefault("timeframe", timeframe)
+        return LauncherEvent(
+            source=source,
+            event_type=event_type,
+            raw_line=raw_line,
+            message=message,
+            payload=metadata,
+            severity=severity,
+            event_code=event_code,
+            network=network,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+
     def _start_process(self, process: QProcess, args: list[str], *, label: str, silent: bool = False) -> bool:
         process.setWorkingDirectory(str(REPO_ROOT))
         self._active_task_context = {"label": label, "silent": silent}
         process.start(sys.executable, args)
         if not process.waitForStarted(3000):
-            event = LauncherEvent(
+            event = self._new_event(
                 source="launcher",
                 event_type="generic",
                 raw_line=f"Nao foi possivel iniciar {label}.",
                 message=f"Nao foi possivel iniciar {label}.",
+                event_code="system.process_start_failed",
+                severity="error",
             )
             self._push_event(event)
             return False
         if not silent:
-            event = LauncherEvent(
+            event = self._new_event(
                 source="launcher",
                 event_type="generic",
                 raw_line=f"{label} iniciado.",
                 message=f"{label} iniciado.",
+                event_code="system.process_started",
             )
             self._push_event(event)
         self._update_controls()
@@ -876,10 +1010,8 @@ class TraderBotLauncher(QMainWindow):
         self._start_process(self.task_process, args, label="Check Hyperliquid", silent=silent)
 
     def _auto_check(self) -> None:
-        if self.run_process.state() != QProcess.NotRunning:
-            self._refresh_connectivity_health()
-            return
         self._run_check(silent=True)
+        self._refresh_connectivity_health()
 
     def _run_smoke(self) -> None:
         mode = self._current_mode()
@@ -898,20 +1030,29 @@ class TraderBotLauncher(QMainWindow):
 
     def _toggle_run(self) -> None:
         if self.run_process.state() == QProcess.NotRunning:
+            self.runtime_stop_requested = False
             args = self._build_base_args(self._current_mode()) + ["run"]
-            self._start_process(self.run_process, args, label="Runtime", silent=False)
+            if self._start_process(self.run_process, args, label="Runtime", silent=False):
+                self.health_state.bot_running = True
+                self.health_state.executor_alive = True
+                self._refresh_connectivity_health()
             return
 
         if self.state.position_label in {"LONG", "SHORT"}:
-            event = LauncherEvent(
+            event = self._new_event(
                 source="launcher",
                 event_type="generic",
                 raw_line="Existe posicao aberta. Use o kill switch antes de parar o bot.",
                 message="Existe posicao aberta. Use o kill switch antes de parar o bot.",
+                severity="warning",
+                event_code="risk.stop_blocked_open_position",
             )
             self._push_event(event)
             return
 
+        self.runtime_stop_requested = True
+        self.health_state.bot_running = False
+        self.health_state.executor_alive = False
         self.run_process.kill()
 
     def _switch_mode(self, mode_key: str) -> None:
@@ -922,7 +1063,8 @@ class TraderBotLauncher(QMainWindow):
         self.current_mode = mode_key
         self.state.network_label = self._current_mode().label.upper()
         self._sync_mode_buttons()
-        self._set_online(False)
+        self.health_state = OperationalHealthState(reason="network_switch_pending_check")
+        self._apply_health_status("offline", "network_switch_pending_check", emit_event=False)
         self.last_connection_signature = None
         self.state.last_decision = f"{self._current_mode().label} selecionada. Atualizando check..."
         self.state.last_update_label = "--"
@@ -978,11 +1120,12 @@ class TraderBotLauncher(QMainWindow):
         self.state.risk_label = _pct(self.cfg.environment.max_risk_per_trade)
         self._refresh_dashboard()
         self._push_event(
-            LauncherEvent(
+            self._new_event(
                 source="launcher",
                 event_type="generic",
                 raw_line="Configuracoes salvas.",
                 message="Configuracoes salvas. Os proximos checks e execucoes ja usarao os novos valores.",
+                event_code="system.settings_saved",
             )
         )
 
@@ -1022,25 +1165,41 @@ class TraderBotLauncher(QMainWindow):
 
     def _handle_run_finished(self, exit_code: int, _status) -> None:
         self._update_controls()
-        self._refresh_connectivity_health()
-        event = LauncherEvent(
+        stop_requested = self.runtime_stop_requested
+        self.runtime_stop_requested = False
+        self.health_state.bot_running = False
+        self.health_state.executor_alive = False
+        if not stop_requested:
+            self._apply_health_status("offline", "runtime_process_exited", emit_event=True)
+        else:
+            self._refresh_connectivity_health()
+        event = self._new_event(
             source="launcher",
             event_type="generic",
             raw_line=f"Runtime finalizado (exit={exit_code}).",
             message=f"Runtime finalizado (exit={exit_code}).",
+            severity="warning" if exit_code else "info",
+            event_code="system.runtime_finished",
         )
         self._push_event(event)
 
     def _handle_task_finished(self, exit_code: int, _status) -> None:
+        label = str(self._active_task_context.get("label") or "")
         silent = bool(self._active_task_context.get("silent"))
         self._update_controls()
+        if label == "Check Hyperliquid" and exit_code != 0:
+            self.health_state.last_healthcheck_at = datetime.now()
+            self.health_state.last_check_execution_ok = False
+            self._refresh_connectivity_health(emit_event=True, forced_reason="health_check_command_failed")
         if exit_code != 0 and not silent:
             self._push_event(
-                LauncherEvent(
+                self._new_event(
                     source="launcher",
                     event_type="generic",
                     raw_line=f"Processo auxiliar finalizado com codigo {exit_code}.",
                     message=f"Processo auxiliar finalizado com codigo {exit_code}.",
+                    severity="warning",
+                    event_code="system.helper_process_finished",
                 )
             )
         if self.pending_emergency_close:
@@ -1076,23 +1235,43 @@ class TraderBotLauncher(QMainWindow):
             self.state.last_decision = "Runtime iniciado. Aguardando proximo ciclo."
             self._refresh_dashboard()
 
-        event = LauncherEvent(source=source, event_type="generic", raw_line=line, message=plain)
+        event = self._new_event(
+            source=source,
+            event_type="generic",
+            raw_line=line,
+            message=plain,
+            event_code="system.raw_log",
+        )
         self._push_event(event)
 
     def _apply_status_payload(self, payload: dict[str, Any], *, source: str) -> None:
-        self.last_check_at = datetime.now()
-        self.state.online = bool(payload.get("connected"))
-        self.state.can_trade = bool(payload.get("can_trade"))
+        check_at = datetime.now()
+        connected = bool(payload.get("connected"))
+        can_trade = bool(payload.get("can_trade"))
+        health_ok = connected and can_trade
+        self.health_state.last_healthcheck_at = check_at
+        self.health_state.last_check_execution_ok = True
+        self.health_state.connection_ok = health_ok
+        self.health_state.executor_alive = self.run_process.state() != QProcess.NotRunning
+        self.health_state.bot_running = self.run_process.state() != QProcess.NotRunning
+        if health_ok:
+            self.health_state.last_successful_healthcheck_at = check_at
+        self.state.online = connected
+        self.state.can_trade = can_trade
         self.state.network_label = str(payload.get("network", self._current_mode().label)).upper()
         self.state.balance_label = _currency(payload.get("available_to_trade", 0.0))
         self.state.risk_label = _pct(self.cfg.environment.max_risk_per_trade)
-        self.state.last_update_label = self.last_check_at.strftime("%H:%M:%S")
+        self.state.last_update_label = check_at.strftime("%H:%M:%S")
         self.state.last_raw_detail = json.dumps(payload, ensure_ascii=False, indent=2)
-        if self.state.online and self.state.can_trade:
+        runtime_running = self.run_process.state() != QProcess.NotRunning
+        if connected and can_trade and not runtime_running:
             self.state.state_label = "AGUARDANDO"
             self.state.state_message = "Sem sinal ativo"
             self.state.state_style = "wait"
-        self._set_online(bool(payload.get("connected")) and bool(payload.get("can_trade")))
+        self._refresh_connectivity_health(
+            emit_event=True,
+            forced_reason="check_hyperliquid_ok" if health_ok else "check_hyperliquid_failed",
+        )
         self._refresh_dashboard()
 
         signature = (
@@ -1104,17 +1283,20 @@ class TraderBotLauncher(QMainWindow):
         should_notify = not bool(self._active_task_context.get("silent")) or signature != self.last_connection_signature
         self.last_connection_signature = signature
         if should_notify:
-            event = LauncherEvent(
+            event = self._new_event(
                 source=source,
                 event_type="status",
                 raw_line=json.dumps(payload, ensure_ascii=False),
                 payload=payload,
+                severity="info" if connected and can_trade else "warning" if connected else "error",
+                event_code="healthcheck.status",
             )
             self._push_event(event)
 
     def _apply_cycle_payload(self, payload: dict[str, Any], *, source: str) -> None:
-        self.last_runtime_seen_at = datetime.now()
-        self.state.last_update_label = self.last_runtime_seen_at.strftime("%H:%M:%S")
+        self.health_state.bot_running = True
+        self.health_state.executor_alive = True
+        self.state.last_update_label = datetime.now().strftime("%H:%M:%S")
         self.state.reference_price = _price(payload.get("reference_price", 0.0))
         self.state.risk_label = _pct(payload.get("dynamic_risk_pct", payload.get("risk_pct", 0.0)))
         self.state.strength_label = _strength(payload.get("final_action", 0.0))
@@ -1167,26 +1349,30 @@ class TraderBotLauncher(QMainWindow):
         else:
             self.state.position_status = "Sem sinal ativo"
 
-        self._set_online(True)
+        self._refresh_connectivity_health()
         self._refresh_dashboard()
 
-        event = LauncherEvent(
+        event = self._new_event(
             source=source,
             event_type="cycle",
             raw_line=json.dumps(payload, ensure_ascii=False),
             payload=payload,
+            severity="execution",
+            event_code="execution.cycle",
         )
         summary = self.log_translator.local.summarize(event)
-        self.state.last_decision = summary.message
+        self.state.last_decision = summary.message_human
         self._refresh_dashboard()
         self._push_event(event, prebuilt=summary)
 
     def _apply_smoke_payload(self, payload: dict[str, Any], *, source: str) -> None:
-        event = LauncherEvent(
+        event = self._new_event(
             source=source,
             event_type="smoke",
             raw_line=json.dumps(payload, ensure_ascii=False),
             payload=payload,
+            severity="execution" if payload.get("ok") else "error",
+            event_code="system.smoke_test",
         )
         self._push_event(event)
 
@@ -1206,11 +1392,13 @@ class TraderBotLauncher(QMainWindow):
             self.state.position_status = "Sem sinal ativo"
             self._refresh_dashboard()
 
-        event = LauncherEvent(
+        event = self._new_event(
             source=source,
             event_type="manual_close",
             raw_line=json.dumps(payload, ensure_ascii=False),
             payload=payload,
+            severity="risk" if payload.get("ok") else "warning",
+            event_code="risk.manual_close",
         )
         self._push_event(event)
 
@@ -1225,7 +1413,7 @@ class TraderBotLauncher(QMainWindow):
 
         if summary.severity == "error":
             self.state.state_label = "ERRO"
-            self.state.state_message = summary.message
+            self.state.state_message = summary.message_human
             self.state.state_style = "error"
             self._refresh_dashboard()
 
@@ -1257,56 +1445,129 @@ class TraderBotLauncher(QMainWindow):
         widget.apply_summary(result)
 
     def _refresh_dashboard(self) -> None:
-        self.mode_badge.setText(self.state.network_label)
-        self.last_check_chip.setText(
-            f"ultimo check {self.state.last_update_label}" if self.state.last_update_label != "--" else "sem check"
+        self.state.symbol_label = str(self.cfg.hyperliquid.symbol)
+        self.state.timeframe_label = str(self.cfg.hyperliquid.timeframe)
+        self.state.execution_mode_label = str(self._current_mode().execution_mode)
+        self.state.connection_label = self.health_state.status
+        self.state.last_valid_check_label = (
+            self.health_state.last_successful_healthcheck_at.strftime("%H:%M:%S")
+            if self.health_state.last_successful_healthcheck_at is not None
+            else "--"
         )
+        self.mode_badge.setText(self.state.network_label)
         self.state_pill.setText(self.state.state_label)
         _set_widget_property(self.state_pill, "status", self.state.state_style)
         self.state_message.setText(self.state.state_message)
-        self.last_decision_label.setText(self.state.last_decision)
-        self.block_reason_label.setText(self.state.blocker_label)
         self.balance_inline.setText(self.state.balance_label)
+        _fit_label_height(self.state_message)
+        _fit_label_height(self.balance_inline)
         self.state_message.updateGeometry()
-        self.last_decision_label.updateGeometry()
 
-        self.regime_tile.update_tile(_display_value(self.state.regime_label, "indefinido"), tone="default")
         self.signal_tile.update_tile(_display_value(self.state.signal_label, "nenhum"), tone="default")
-        self.direction_tile.update_tile(_display_value(self.state.direction_label, "nenhuma"), tone="default")
-        self.strength_tile.update_tile(self.state.strength_label, tone="execution")
+        reason_value = self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else self.state.state_message
+        self.reason_tile.update_tile(_display_value(reason_value, "indefinido"), tone="default")
         self.price_tile.update_tile(self.state.reference_price, tone="default")
         self.risk_tile.update_tile(self.state.risk_label, tone="warning")
+        self.position_tile.update_tile(_display_value(self.state.position_label, "FLAT"), tone="default")
+        self.pnl_tile.update_tile(self.state.pnl_label, tone=self.state.pnl_style)
 
         self.position_pill.setText(self.state.position_label)
         position_style = "long" if self.state.position_label == "LONG" else "short" if self.state.position_label == "SHORT" else "flat"
         _set_widget_property(self.position_pill, "status", position_style)
         self.position_status.setText(self.state.position_status)
+        _fit_label_height(self.position_status)
         self.position_status.updateGeometry()
         self.pnl_value.setText(self.state.pnl_label)
+        _fit_label_height(self.pnl_value)
         _set_widget_property(self.pnl_value, "tone", self.state.pnl_style)
         self.position_size_value.setText(self.state.position_size_label)
+        _fit_label_height(self.position_size_value)
         self.entry_value.setText(self.state.entry_label)
+        _fit_label_height(self.entry_value)
         self.tp_value.setText(self.state.take_profit_label)
+        _fit_label_height(self.tp_value)
         self.sl_value.setText(self.state.stop_loss_label)
+        _fit_label_height(self.sl_value)
 
-    def _set_online(self, value: bool) -> None:
-        self.state.online = value
-        text = "online" if value else "offline"
+        self.connection_tile.update_tile(_display_value(self.state.connection_label, "offline"), tone="default")
+        self.heartbeat_tile.update_tile(_display_value(self.state.last_valid_check_label, "--"), tone="default")
+
+        self.details_decision_label.setText(f"Ultima decisao: {self.state.last_decision}")
+        _fit_label_height(self.details_decision_label)
+        self.details_context_label.setText(
+            "Contexto: "
+            f"{_display_value(self.state.symbol_label, '--')} • "
+            f"{_display_value(self.state.timeframe_label, '--')} • "
+            f"{_display_value(self.state.network_label, '--')}"
+        )
+        _fit_label_height(self.details_context_label)
+        self.details_signal_label.setText(
+            f"Ultimo sinal: {_display_value(self.state.signal_label, 'nenhum')} | Direcao: {_display_value(self.state.direction_label, 'nenhuma')}"
+        )
+        _fit_label_height(self.details_signal_label)
+        self.details_block_label.setText(f"Bloqueio atual: {self.state.blocker_label}")
+        _fit_label_height(self.details_block_label)
+
+    def _apply_health_status(self, status: str, reason: str, *, emit_event: bool = False) -> None:
+        previous_status = self.health_state.status
+        self.health_state.status = status
+        self.health_state.reason = reason
+        self.state.online = status == "online"
+        text = status
         self.health_chip.setText(text)
         _set_widget_property(self.health_chip, "state", text)
+        if emit_event and previous_status != status:
+            self._push_event(
+                self._new_event(
+                    source="launcher",
+                    event_type="health",
+                    raw_line=f"health_status_change | status={status} | reason={reason}",
+                    payload={
+                        "status": status,
+                        "reason": reason,
+                        "bot_running": self.health_state.bot_running,
+                        "connection_ok": self.health_state.connection_ok,
+                        "executor_alive": self.health_state.executor_alive,
+                        "last_healthcheck_at": self.health_state.last_healthcheck_at.isoformat() if self.health_state.last_healthcheck_at else None,
+                        "last_successful_healthcheck_at": self.health_state.last_successful_healthcheck_at.isoformat() if self.health_state.last_successful_healthcheck_at else None,
+                    },
+                    message=f"health_status_change | status={status} | reason={reason}",
+                    severity="info" if status == "online" else "warning" if status == "warning" else "error",
+                    event_code=f"health.{reason}",
+                )
+            )
 
-    def _refresh_connectivity_health(self) -> None:
-        now = datetime.now()
-        threshold = int(self.cfg.launcher.auto_check_interval_seconds) * 2
-        if self.last_runtime_seen_at is not None:
-            alive = (now - self.last_runtime_seen_at).total_seconds() <= threshold
-            self._set_online(alive)
-            return
-        if self.last_check_at is not None:
-            alive = (now - self.last_check_at).total_seconds() <= threshold and self.state.can_trade
-            self._set_online(alive)
-            return
-        self._set_online(False)
+    def _derive_health_status(self, *, forced_reason: str | None = None) -> tuple[str, str]:
+        state = self.health_state
+        threshold = max(30, int(self.cfg.launcher.auto_check_interval_seconds) * 2)
+
+        if not state.bot_running:
+            return "offline", "bot_not_running"
+
+        if not state.executor_alive:
+            return "offline", "executor_not_alive"
+
+        if state.last_healthcheck_at is None:
+            return "warning", "awaiting_first_healthcheck"
+
+        age_seconds = (datetime.now() - state.last_healthcheck_at).total_seconds()
+
+        if state.last_check_execution_ok is False and age_seconds <= threshold:
+            return "warning", "health_check_command_failed"
+
+        if age_seconds > threshold:
+            return "warning", "health_check_stale_while_running"
+
+        if state.connection_ok:
+            return "online", forced_reason if forced_reason == "check_hyperliquid_ok" else "bot_running_and_healthcheck_ok"
+
+        return "offline", forced_reason if forced_reason == "check_hyperliquid_failed" else "connection_check_failed"
+
+    def _refresh_connectivity_health(self, *, emit_event: bool = False, forced_reason: str | None = None) -> None:
+        self.health_state.bot_running = self.run_process.state() != QProcess.NotRunning
+        self.health_state.executor_alive = self.run_process.state() != QProcess.NotRunning
+        status, reason = self._derive_health_status(forced_reason=forced_reason)
+        self._apply_health_status(status, reason, emit_event=emit_event)
 
     def _signal_label(self, final_action: float) -> str:
         threshold = float(self.cfg.environment.action_hold_threshold)

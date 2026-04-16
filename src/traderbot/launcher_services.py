@@ -25,18 +25,62 @@ class LauncherEvent:
     message: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
     occurred_at: datetime = field(default_factory=datetime.now)
-
-
-@dataclass(slots=True)
-class HumanizedEvent:
-    severity: str
-    message: str
-    details: str | None
-    color: str
-    relevant: bool
-    fingerprint: str
-    occurred_at: datetime
+    severity: str = "info"
+    event_code: str | None = None
+    details: str | None = None
+    network: str | None = None
+    symbol: str | None = None
+    timeframe: str | None = None
+    color: str = "blue"
+    relevant: bool = True
+    fingerprint: str = ""
     raw_detail: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.raw_detail:
+            self.raw_detail = self.raw_line
+        if self.network is None:
+            self.network = self._derive_context_field("network")
+        if self.symbol is None:
+            self.symbol = self._derive_context_field("symbol")
+        if self.timeframe is None:
+            self.timeframe = self._derive_context_field("timeframe")
+
+    def _derive_context_field(self, field_name: str) -> str | None:
+        value = self.payload.get(field_name)
+        if value not in (None, ""):
+            return str(value)
+        match = re.search(rf"{re.escape(field_name)}=([^ |\n]+)", self.raw_line, flags=re.IGNORECASE)
+        if match is None:
+            return None
+        return match.group(1).strip()
+
+    @property
+    def timestamp(self) -> datetime:
+        return self.occurred_at
+
+    @property
+    def type(self) -> str:
+        return self.event_type
+
+    @property
+    def message_raw(self) -> str:
+        return self.raw_line
+
+    @property
+    def message_human(self) -> str:
+        return self.message
+
+    @message_human.setter
+    def message_human(self, value: str) -> None:
+        self.message = value
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self.payload
+
+
+HumanizedEvent = LauncherEvent
 
 
 STATE_COLORS = {
@@ -54,6 +98,8 @@ class LocalLogInterpreter:
 
     def summarize(self, event: LauncherEvent) -> HumanizedEvent:
         payload = event.payload or {}
+        if event.event_type == "health":
+            return self._health_event(event, payload)
         if event.event_type == "status":
             return self._status_event(event, payload)
         if event.event_type == "cycle":
@@ -87,6 +133,7 @@ class LocalLogInterpreter:
             message=short,
             details=details,
             fingerprint=f"status:{network}:{connected}:{can_trade}",
+            event_code="healthcheck.status",
         )
 
     def _cycle_event(self, event: LauncherEvent, payload: dict[str, Any]) -> HumanizedEvent:
@@ -97,6 +144,7 @@ class LocalLogInterpreter:
                 message="Erro operacional no ciclo do bot",
                 details=str(payload.get("error")),
                 fingerprint=f"cycle:error:{str(payload.get('error')).lower()}",
+                event_code="execution.cycle_error",
             )
 
         if payload.get("opened_trade"):
@@ -109,6 +157,7 @@ class LocalLogInterpreter:
                 message=f"Nova posicao {direction} aberta em ${notional:,.2f}",
                 details=f"Risco efetivo usado no disparo: ${risk_amount:,.2f}.",
                 fingerprint=f"cycle:open:{direction}",
+                event_code="execution.trade_open",
             )
 
         if payload.get("closed_trade"):
@@ -119,6 +168,7 @@ class LocalLogInterpreter:
                 message=f"Posicao encerrada por {exit_reason}",
                 details="A posicao foi fechada e o bot voltou a aguardar a proxima oportunidade.",
                 fingerprint=f"cycle:close:{str(payload.get('exit_reason', 'unknown')).lower()}",
+                event_code="execution.trade_close",
             )
 
         if payload.get("blocked_reason"):
@@ -129,6 +179,7 @@ class LocalLogInterpreter:
                 message=reason,
                 details=None,
                 fingerprint=f"cycle:block:{str(payload.get('blocked_reason')).lower()}",
+                event_code=f"blocked.{str(payload.get('blocked_reason')).lower()}",
             )
 
         if payload.get("position_is_open"):
@@ -139,6 +190,7 @@ class LocalLogInterpreter:
                 message=f"Posicao mantida; ensemble segue em {vote_bucket}",
                 details=None,
                 fingerprint=f"cycle:hold-open:{vote_bucket}",
+                event_code="execution.position_held",
                 relevant=False,
             )
 
@@ -156,6 +208,7 @@ class LocalLogInterpreter:
             message=short_message,
             details=f"{details} Ensemble em {vote_bucket}.",
             fingerprint=f"cycle:flat:{vote_bucket}:{regime_valid}",
+            event_code="system.waiting",
             relevant=False,
         )
 
@@ -174,6 +227,7 @@ class LocalLogInterpreter:
             ),
             details=f"Abertura={opened} | fechamento={closed}.",
             fingerprint=f"smoke:{network}:{ok}:{opened}:{closed}",
+            event_code="system.smoke_test",
         )
 
     def _manual_close_event(self, event: LauncherEvent, payload: dict[str, Any]) -> HumanizedEvent:
@@ -188,6 +242,52 @@ class LocalLogInterpreter:
             ),
             details="Fechamento manual enviado pelo launcher.",
             fingerprint=f"manual_close:{ok}",
+            event_code="risk.manual_close",
+        )
+
+    def _health_event(self, event: LauncherEvent, payload: dict[str, Any]) -> HumanizedEvent:
+        status = str(payload.get("status", "online" if payload.get("online") else "offline")).lower()
+        reason = str(payload.get("reason", "unknown"))
+        bot_running = bool(payload.get("bot_running"))
+        connection_ok = bool(payload.get("connection_ok"))
+        executor_alive = bool(payload.get("executor_alive"))
+
+        online_messages = {
+            "check_hyperliquid_ok": "Check operacional confirmou sistema online",
+            "bot_running_and_healthcheck_ok": "Bot rodando com saude operacional valida",
+        }
+        warning_messages = {
+            "awaiting_first_healthcheck": "Bot rodando e aguardando o primeiro check",
+            "health_check_command_failed": "Check operacional falhou, mas o bot segue rodando",
+            "health_check_stale_while_running": "Check operacional esta atrasado",
+        }
+        offline_messages = {
+            "check_hyperliquid_failed": "Check operacional marcou o sistema como offline",
+            "connection_check_failed": "Falha confirmada na conectividade operacional",
+            "runtime_process_exited": "Runtime foi encerrado inesperadamente",
+            "bot_not_running": "Bot parado",
+            "executor_not_alive": "Executor indisponivel",
+            "network_switch_pending_check": "Trocando de rede e aguardando novo check",
+        }
+
+        if status == "online":
+            message = online_messages.get(reason, "Sistema online")
+            severity = "info"
+        elif status == "warning":
+            message = warning_messages.get(reason, "Saude operacional instavel")
+            severity = "warning"
+        else:
+            message = offline_messages.get(reason, "Sistema offline")
+            severity = "error" if bot_running or connection_ok is False or executor_alive is False else "warning"
+
+        details = f"Motivo tecnico: {reason}"
+        return self._build(
+            event,
+            severity=severity,
+            message=message,
+            details=details,
+            fingerprint=f"health:{status}:{reason}",
+            event_code=f"health.{reason}",
         )
 
     def _generic_event(self, event: LauncherEvent) -> HumanizedEvent:
@@ -237,6 +337,7 @@ class LocalLogInterpreter:
             message=short,
             details=details,
             fingerprint=f"generic:{self._normalize(message)}",
+            event_code=f"system.{severity}",
             relevant=is_relevant and "ciclo runtime" not in lowered,
         )
 
@@ -248,17 +349,26 @@ class LocalLogInterpreter:
         message: str,
         details: str | None,
         fingerprint: str,
+        event_code: str | None = None,
         relevant: bool = True,
     ) -> HumanizedEvent:
         color = STATE_COLORS.get(severity, "blue")
         return HumanizedEvent(
-            severity=severity,
+            source=event.source,
+            event_type=event.event_type,
+            raw_line=event.raw_line,
             message=message,
+            payload=dict(event.payload or {}),
+            occurred_at=event.occurred_at,
+            severity=severity,
+            event_code=event_code,
             details=details,
+            network=event.network,
+            symbol=event.symbol,
+            timeframe=event.timeframe,
             color=color,
             relevant=relevant,
             fingerprint=fingerprint,
-            occurred_at=event.occurred_at,
             raw_detail=event.raw_line,
         )
 
@@ -358,15 +468,20 @@ class OpenAILogTranslator:
 
     def cache_key(self, event: LauncherEvent, fallback: HumanizedEvent) -> str:
         raw_payload = {
-            "event_type": event.event_type,
-            "payload": event.payload,
-            "message": event.message,
+            "type": event.type,
+            "severity": event.severity,
+            "event_code": event.event_code,
+            "message_raw": self._normalize_cache_text(event.message_raw),
+            "network": event.network,
+            "symbol": event.symbol,
+            "timeframe": event.timeframe,
             "fallback": {
                 "severity": fallback.severity,
-                "message": fallback.message,
+                "message_human": fallback.message_human,
                 "details": fallback.details,
                 "color": fallback.color,
                 "relevant": fallback.relevant,
+                "event_code": fallback.event_code,
             },
         }
         serialized = json.dumps(raw_payload, ensure_ascii=False, sort_keys=True, default=str)
@@ -396,7 +511,20 @@ class OpenAILogTranslator:
                 },
                 "required": ["severity", "message", "details", "color", "relevant"],
             }
-            raw_log = event.raw_line or event.message or json.dumps(event.payload, ensure_ascii=False)
+            structured_input = {
+                "timestamp": event.timestamp.isoformat(),
+                "type": event.type,
+                "severity": event.severity,
+                "event_code": event.event_code,
+                "message_raw": event.message_raw,
+                "message_human_fallback": fallback.message_human,
+                "details_fallback": fallback.details,
+                "network": event.network,
+                "symbol": event.symbol,
+                "timeframe": event.timeframe,
+                "metadata": event.metadata,
+            }
+            raw_log = event.message_raw or event.message_human or json.dumps(event.metadata, ensure_ascii=False)
             response = client.responses.create(
                 model="gpt-4o-mini",
                 input=[
@@ -449,7 +577,7 @@ class OpenAILogTranslator:
                         "content": [
                             {
                                 "type": "input_text",
-                                "text": f"INPUT:\n\nLOG:\n{raw_log}",
+                                "text": f"INPUT:\n\nEVENT:\n{json.dumps(structured_input, ensure_ascii=False)}\n\nLOG:\n{raw_log}",
                             }
                         ],
                     },
@@ -463,15 +591,23 @@ class OpenAILogTranslator:
                     }
                 },
             )
-            translated = json.loads(response.output_text)
+            translated = self._parse_translation_payload(response.output_text)
             candidate = HumanizedEvent(
+                source=fallback.source,
+                event_type=fallback.event_type,
+                raw_line=fallback.raw_line,
+                payload=dict(fallback.payload or {}),
+                occurred_at=fallback.occurred_at,
                 severity=str(translated.get("severity", fallback.severity)),
-                message=str(translated.get("message", fallback.message)),
+                message=str(translated.get("message", fallback.message_human)),
+                event_code=fallback.event_code,
                 details=translated.get("details", fallback.details),
+                network=fallback.network,
+                symbol=fallback.symbol,
+                timeframe=fallback.timeframe,
                 color=str(translated.get("color", fallback.color)),
                 relevant=bool(translated.get("relevant", fallback.relevant)),
                 fingerprint=fallback.fingerprint,
-                occurred_at=fallback.occurred_at,
                 raw_detail=fallback.raw_detail,
             )
             result = candidate if self._is_clean_translation(candidate, raw_log) else fallback
@@ -492,7 +628,7 @@ class OpenAILogTranslator:
         }
 
     def _is_clean_translation(self, event: HumanizedEvent, raw_log: str) -> bool:
-        message = (event.message or "").strip()
+        message = (event.message_human or "").strip()
         lowered = message.lower()
         raw_lowered = (raw_log or "").strip().lower()
         if not message:
@@ -508,8 +644,47 @@ class OpenAILogTranslator:
             "requests.",
             "hyperliquid |",
             "0x",
+            "http://",
+            "https://",
             "{",
             "}",
             "|",
+            "=",
         )
         return not any(fragment in lowered for fragment in forbidden)
+
+    def _parse_translation_payload(self, raw_output: str) -> dict[str, Any]:
+        payload = json.loads(raw_output)
+        if not isinstance(payload, dict):
+            raise ValueError("translation payload is not an object")
+
+        severity = str(payload.get("severity", "")).strip().lower()
+        color = str(payload.get("color", "")).strip().lower()
+        message = str(payload.get("message", "")).strip()
+        relevant = payload.get("relevant")
+        details = payload.get("details")
+
+        if severity not in {"info", "warning", "error", "execution", "risk", "blocked"}:
+            raise ValueError("invalid severity")
+        if color not in {"blue", "yellow", "red", "purple", "orange", "gray"}:
+            raise ValueError("invalid color")
+        if not message:
+            raise ValueError("empty message")
+        if relevant is not True and relevant is not False:
+            raise ValueError("invalid relevant flag")
+        if details is not None and not isinstance(details, str):
+            raise ValueError("invalid details")
+
+        return {
+            "severity": severity,
+            "message": message,
+            "details": details,
+            "color": color,
+            "relevant": bool(relevant),
+        }
+
+    def _normalize_cache_text(self, text: str) -> str:
+        compact = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+        compact = re.sub(r"\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|z)?", "<ts>", compact)
+        compact = re.sub(r"\b\d{2}:\d{2}:\d{2}\b", "<time>", compact)
+        return compact
