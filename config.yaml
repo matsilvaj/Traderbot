@@ -1,33 +1,27 @@
-﻿app_name: traderbot-rl
-
+app_name: traderbot-rl
 paths:
   models_dir: models
   results_dir: results
   logs_dir: logs
-
-# Configuracao Hyperliquid
 hyperliquid:
   enabled: true
-  wallet_address: null  # Deixe null para ler do .env
-  private_key: null     # Deixe null para ler do .env
-  network: testnet      # mainnet ou testnet
-  symbol: BTC           # Na HL o ativo é apenas BTC (e não BTCUSD)
-  timeframe: 1h         # Formato CCXT/HL
+  wallet_address: null
+  private_key: null
+  network: testnet
+  symbol: BTC
+  timeframe: 1h
   history_bars: 10000
   live_window_bars: 2000
-
 data:
   source: csv
   csv_path: data/binance_btcusdt_h1.csv
   timestamp_column: timestamp
-
 features:
   rsi_period: 14
   ma_short_period: 9
   ma_long_period: 21
   momentum_period: 3
   normalize: true
-
 environment:
   initial_balance: 250.0
   simulation_initial_balance: 250.0
@@ -35,10 +29,8 @@ environment:
   action_hold_threshold: 0.65
   regime_min_abs_dist_ema_240: 0.025
   regime_min_vol_regime_z: 0.3
-
-  # NOVAS TAXAS (Substituem spread_bps e slippage_bps)
-  taker_fee_pct: 0.00045   # 0.045% - Taxa Base Taker da HL (Tier 0)
-  slippage_pct: 0.00010    # 0.01% - Estimativa de escorregamento da ordem a mercado
+  taker_fee_pct: 0.00045
+  slippage_pct: 0.0001
   stop_loss_pct: 0.02
   take_profit_pct: 0.05
   force_exit_only_by_tp_sl: true
@@ -50,8 +42,6 @@ environment:
   close_loss_penalty: 0.0
   broker_min_notional_usd: 10.0
   use_broker_constraints: true
-
-  # VALORES ATUALIZADOS PARA HYPERLIQUID (BTC)
   broker_volume_min: 0.0001
   broker_volume_step: 0.0001
   broker_volume_max: 22.0
@@ -62,14 +52,12 @@ environment:
   trade_cooldown_steps: 1
   margin_call_drawdown_pct: 0.8
   margin_call_penalty: 10.0
-
 ablation:
   enabled: false
   pain_decay_factors:
-    - 0.0
-    - 0.001
-    - 0.002
-
+  - 0.0
+  - 0.001
+  - 0.002
 training:
   total_timesteps: 10000000
   learning_rate: 0.0003
@@ -89,10 +77,9 @@ training:
   log_interval_steps: 5000
   log_trade_events: false
   acceptance_min_total_profit: 2.0
-  max_drawdown_limit: 0.40
+  max_drawdown_limit: 0.4
   acceptance_min_profit_per_trade: 0.0001
   acceptance_min_pass_rate: 0.4
-
 execution:
   execution_mode: exchange
   decision_mode: ensemble_majority_vote
@@ -103,17 +90,23 @@ execution:
   ensemble_enabled: true
   backtest_ensemble_only: false
   selected_model_names:
-    - ppo_btc_h1_s1
-    - ppo_btc_h1_s21
-    - ppo_btc_h1_s256
-    - ppo_btc_h1_s512
-    - ppo_btc_h1_s999
+  - ppo_btc_h1_s1
+  - ppo_btc_h1_s21
+  - ppo_btc_h1_s256
+  - ppo_btc_h1_s512
+  - ppo_btc_h1_s999
   allow_live_trading: true
   min_seconds_between_orders: 10
   api_retry_attempts: 2
   api_retry_delay_seconds: 3
   pause_on_error_seconds: 60
-
+launcher:
+  auto_check_interval_seconds: 90
+  notification_limit: 80
+  openai_enabled: true
+  openai_model: gpt-4o-mini
+  openai_timeout_seconds: 12
+  openai_api_key_env: OPENAI_API_KEY
 retraining:
   enabled: false
   interval_minutes: 60

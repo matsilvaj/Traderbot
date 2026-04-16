@@ -130,6 +130,16 @@ class ExecutionConfig:
 
 
 @dataclass
+class LauncherConfig:
+    auto_check_interval_seconds: int = 90
+    notification_limit: int = 80
+    openai_enabled: bool = True
+    openai_model: str = "gpt-4o-mini"
+    openai_timeout_seconds: int = 12
+    openai_api_key_env: str = "OPENAI_API_KEY"
+
+
+@dataclass
 class RetrainingConfig:
     enabled: bool = False
     interval_minutes: int = 60
@@ -146,6 +156,7 @@ class AppConfig:
     ablation: AblationConfig = field(default_factory=AblationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    launcher: LauncherConfig = field(default_factory=LauncherConfig)
     retraining: RetrainingConfig = field(default_factory=RetrainingConfig)
 
 
@@ -202,6 +213,7 @@ def _build_config(raw: dict[str, Any]) -> AppConfig:
         ablation=AblationConfig(**raw.get("ablation", {})),
         training=TrainingConfig(**raw.get("training", {})),
         execution=ExecutionConfig(**execution_raw),
+        launcher=LauncherConfig(**raw.get("launcher", {})),
         retraining=RetrainingConfig(**raw.get("retraining", {})),
     )
 

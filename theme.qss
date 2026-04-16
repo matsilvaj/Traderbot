@@ -1,0 +1,353 @@
+QWidget {
+    color: #E6EDF3;
+    font-family: "Inter", "Segoe UI";
+    font-size: 13px;
+}
+
+QMainWindow,
+QWidget#centralWidget,
+QDialog#dialogSurface {
+    background-color: #0B0F14;
+}
+
+QLabel {
+    background: transparent;
+    background-color: transparent;
+    border: none;
+    padding: 2px 0;
+}
+
+QFrame#card,
+QFrame#TopBar,
+QFrame#HeroCard,
+QFrame#PositionCard,
+QFrame#NotificationPanel,
+QFrame#LevelBox {
+    background-color: #0F141B;
+    border: 1px solid #1F2933;
+    border-radius: 18px;
+}
+
+QFrame#card:hover,
+QFrame#event:hover,
+QFrame#TopBar:hover,
+QFrame#HeroCard:hover,
+QFrame#PositionCard:hover,
+QFrame#NotificationPanel:hover,
+QFrame#LevelBox:hover {
+    background-color: #151B23;
+}
+
+QFrame#SegmentFrame {
+    background-color: #0F141B;
+    border: 1px solid #1F2933;
+    border-radius: 18px;
+}
+
+QFrame#AdvancedFrame {
+    background: transparent;
+    border: none;
+}
+
+QPushButton {
+    background-color: transparent;
+    border: 1px solid #1F2933;
+    border-radius: 8px;
+    padding: 6px 12px;
+    color: #E6EDF3;
+}
+
+QPushButton:hover {
+    background-color: #151B23;
+}
+
+QPushButton:checked {
+    background-color: #151B23;
+    border-color: #8B5CF6;
+    color: #E6EDF3;
+    font-weight: 700;
+}
+
+QPushButton#PrimaryButton,
+QPushButton#primary {
+    background-color: #8B5CF6;
+    border: none;
+    color: white;
+    font-weight: 700;
+}
+
+QPushButton#PrimaryButton:hover,
+QPushButton#primary:hover {
+    background-color: #7C3AED;
+}
+
+QPushButton#SecondaryButton {
+    background-color: transparent;
+}
+
+QPushButton#DangerGhostButton {
+    border: 1px solid #EF4444;
+    color: #EF4444;
+}
+
+QPushButton#DangerGhostButton:hover {
+    background-color: rgba(239, 68, 68, 0.10);
+}
+
+QPushButton#IconButton {
+    min-width: 40px;
+    max-width: 40px;
+    min-height: 40px;
+    max-height: 40px;
+    border-radius: 14px;
+    padding: 0;
+}
+
+QLineEdit,
+QDoubleSpinBox,
+QPlainTextEdit#technicalLog {
+    background-color: #0F141B;
+    border: 1px solid #1F2933;
+    border-radius: 8px;
+    padding: 6px;
+    color: #E6EDF3;
+}
+
+QPlainTextEdit#technicalLog {
+    font-family: "JetBrains Mono", "Cascadia Mono", "Consolas";
+    font-size: 12px;
+}
+
+QLineEdit:focus,
+QDoubleSpinBox:focus,
+QPlainTextEdit#technicalLog:focus {
+    border: 1px solid #3B82F6;
+}
+
+QCheckBox {
+    color: #E6EDF3;
+}
+
+QLabel#dialogTitle,
+QLabel#HeroTitle {
+    font-size: 26px;
+    font-weight: 700;
+}
+
+QLabel#PanelTitle {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+QLabel#PositionStatus {
+    font-size: 22px;
+    font-weight: 700;
+}
+
+QLabel#metaLabel,
+QLabel#MetricLabel,
+QLabel#fieldLabel {
+    color: #9AA4AF;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+}
+
+QLabel#subtleText,
+QLabel#HeroHint,
+QLabel#PanelHint,
+QLabel#MetricNote {
+    color: #9AA4AF;
+}
+
+QLabel#metricValue,
+QLabel#LevelValue,
+QLabel#PositionNotional,
+QLabel#BalanceValue {
+    font-size: 24px;
+    font-weight: 700;
+    font-family: "Consolas", "JetBrains Mono", "Roboto Mono", monospace;
+}
+
+QLabel#BalanceValue,
+QLabel#PnlValue {
+    font-size: 30px;
+    font-weight: 700;
+    font-family: "Consolas", "JetBrains Mono", "Roboto Mono", monospace;
+}
+
+QLabel#notificationMessage {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+QLabel#badge,
+QLabel#ModeBadge,
+QLabel#SubtleChip,
+QLabel#BlockChip,
+QLabel#HealthChip,
+QLabel#StatePill,
+QLabel#PositionPill {
+    background-color: #151B23;
+    border: 1px solid #1F2933;
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: #9AA4AF;
+    font-weight: 600;
+}
+
+QLabel#badge[severity="info"],
+QLabel#severityDot[severity="info"] {
+    color: #3B82F6;
+}
+
+QLabel#badge[severity="warning"],
+QLabel#severityDot[severity="warning"] {
+    color: #EAB308;
+}
+
+QLabel#badge[severity="error"],
+QLabel#severityDot[severity="error"] {
+    color: #EF4444;
+}
+
+QLabel#badge[severity="execution"],
+QLabel#severityDot[severity="execution"] {
+    color: #8B5CF6;
+}
+
+QLabel#badge[severity="risk"],
+QLabel#severityDot[severity="risk"] {
+    color: #F59E0B;
+}
+
+QLabel#badge[severity="blocked"],
+QLabel#severityDot[severity="blocked"] {
+    color: #6B7280;
+}
+
+QLabel#HealthChip[state="online"] {
+    color: #22C55E;
+}
+
+QLabel#HealthChip[state="offline"] {
+    color: #EF4444;
+}
+
+QLabel#StatePill[status="flat"],
+QLabel#PositionPill[status="flat"] {
+    color: #6B7280;
+}
+
+QLabel#StatePill[status="long"],
+QLabel#PositionPill[status="long"] {
+    color: #22C55E;
+}
+
+QLabel#StatePill[status="short"],
+QLabel#PositionPill[status="short"] {
+    color: #EF4444;
+}
+
+QLabel#StatePill[status="wait"],
+QLabel#PositionPill[status="wait"] {
+    color: #3B82F6;
+}
+
+QLabel#StatePill[status="error"],
+QLabel#PositionPill[status="error"] {
+    color: #EF4444;
+}
+
+QLabel#StatePill[status="blocked"],
+QLabel#PositionPill[status="blocked"] {
+    color: #6B7280;
+}
+
+QLabel#metricValue[tone="default"],
+QLabel#LevelValue[tone="default"],
+QLabel#PnlValue[tone="default"] {
+    color: #E6EDF3;
+}
+
+QLabel#metricValue[tone="muted"],
+QLabel#LevelValue[tone="muted"],
+QLabel#PnlValue[tone="muted"] {
+    color: #6B7280;
+}
+
+QLabel#metricValue[tone="info"],
+QLabel#LevelValue[tone="info"],
+QLabel#PnlValue[tone="info"] {
+    color: #3B82F6;
+}
+
+QLabel#metricValue[tone="execution"],
+QLabel#LevelValue[tone="execution"],
+QLabel#PnlValue[tone="execution"] {
+    color: #8B5CF6;
+}
+
+QLabel#metricValue[tone="warning"],
+QLabel#LevelValue[tone="warning"],
+QLabel#PnlValue[tone="warning"] {
+    color: #EAB308;
+}
+
+QLabel#metricValue[tone="success"],
+QLabel#LevelValue[tone="success"],
+QLabel#PnlValue[tone="success"] {
+    color: #22C55E;
+}
+
+QLabel#metricValue[tone="error"],
+QLabel#LevelValue[tone="error"],
+QLabel#PnlValue[tone="error"] {
+    color: #EF4444;
+}
+
+QFrame#event {
+    background-color: #0F141B;
+    border: 1px solid #1F2933;
+    border-left: 3px solid #3B82F6;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+QFrame#event[severity="info"] {
+    border-left: 3px solid #3B82F6;
+}
+
+QFrame#event[severity="warning"] {
+    border-left: 3px solid #EAB308;
+}
+
+QFrame#event[severity="error"] {
+    border-left: 3px solid #EF4444;
+}
+
+QFrame#event[severity="execution"] {
+    border-left: 3px solid #8B5CF6;
+}
+
+QFrame#event[severity="risk"] {
+    border-left: 3px solid #F59E0B;
+}
+
+QFrame#event[severity="blocked"] {
+    border-left: 3px solid #6B7280;
+}
+
+QScrollArea#NotificationScroll {
+    background: transparent;
+    border: none;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+}
+
+QScrollBar::handle:vertical {
+    background: #1F2933;
+    border-radius: 4px;
+}
