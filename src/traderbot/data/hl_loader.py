@@ -65,13 +65,28 @@ class HLDataLoader:
             token_indexes = item.get("tokens", []) or []
             if token_indexes:
                 max_token_index = max(max_token_index, max(int(idx) for idx in token_indexes))
-        if max_token_index < 0 or len(tokens) > max_token_index:
-            return spot_meta
 
-        dense_tokens: list[dict] = [{"name": f"__missing_{i}", "szDecimals": 0} for i in range(max_token_index + 1)]
+        if max_token_index < 0:
+            normalized = dict(spot_meta)
+            normalized["tokens"] = [
+                {
+                    **dict(token),
+                    "index": int(token.get("index", idx)),
+                }
+                for idx, token in enumerate(tokens)
+            ]
+            return normalized
+
+        dense_tokens: list[dict] = [
+            {"name": f"__missing_{i}", "szDecimals": 0, "index": i}
+            for i in range(max_token_index + 1)
+        ]
         for idx, token in enumerate(tokens):
-            if idx < len(dense_tokens):
-                dense_tokens[idx] = token
+            token_dict = dict(token)
+            target_index = int(token_dict.get("index", idx))
+            if 0 <= target_index < len(dense_tokens):
+                token_dict["index"] = target_index
+                dense_tokens[target_index] = token_dict
         normalized = dict(spot_meta)
         normalized["tokens"] = dense_tokens
         return normalized

@@ -799,6 +799,37 @@ class HyperliquidExecutor:
 
         return self._close_live_position(snapshot, current_price, timestamp, trigger)
 
+    def close_open_position(self, trigger: str = "manual_close") -> dict:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        snapshot = self.get_position_snapshot()
+        if int(snapshot.get("side", 0)) == 0:
+            return {
+                "ok": False,
+                "closed_position": False,
+                "mode": self._operational_mode_label(),
+                "timestamp": timestamp,
+                "trigger": trigger,
+                "message": "No open position to close.",
+                "position_snapshot": snapshot,
+            }
+
+        current_price = self._get_mid_price()
+        if self._execution_mode() == "paper_local":
+            close_event = self._paper_close_position(current_price)
+            return {
+                "ok": bool(close_event.get("closed", False)),
+                "closed_position": bool(close_event.get("closed", False)),
+                "mode": self._operational_mode_label(),
+                "timestamp": timestamp,
+                "trigger": trigger,
+                "close_event": close_event,
+                "position_snapshot": self.get_position_snapshot(),
+            }
+
+        result = self._close_live_position(snapshot, current_price, timestamp, trigger)
+        result["closed_position"] = bool(result.get("ok", False))
+        return result
+
     def run_smoke_test(self, side: str = "buy", wait_seconds: float = 3.0, order_slippage: float | None = None) -> dict:
         execution_mode = self._execution_mode()
         network = str(self.hl_cfg.network).lower().strip()

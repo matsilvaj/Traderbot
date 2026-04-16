@@ -33,6 +33,26 @@ Instalacao:
 pip install -r requirements.txt
 ```
 
+## Launcher Desktop
+
+Launcher moderno para operacao do bot sem precisar editar o `config.yaml`:
+
+```powershell
+python -m traderbot.launcher
+```
+
+No Windows, voce tambem pode abrir direto por:
+
+```powershell
+Abrir_TraderBot.bat
+```
+
+O launcher permite:
+- trocar entre `paper_local`, `testnet` e `mainnet`
+- rodar `check`, `smoke` e `run` por botao
+- acompanhar status, saldo, posicao e logs curtos
+- usar kill switch para encerrar posicao no modo `exchange`
+
 ## Estrutura
 
 - [config.yaml](C:\Users\Matheus\Documents\Traderbot\config.yaml): configuracao principal

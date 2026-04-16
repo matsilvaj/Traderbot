@@ -1,0 +1,22 @@
+{
+  "total_profit": -200.2449401764,
+  "max_drawdown": -0.8145973176097644,
+  "num_trades": 879.0,
+  "agent_orders": 1246.0,
+  "blocked_trades": 1366.0,
+  "blocked_by_cooldown": 1366.0,
+  "blocked_by_min_notional": 0.0,
+  "blocked_by_volume_min": 0.0,
+  "blocked_by_invalid_stop_distance": 0.0,
+  "blocked_trade_rate": 0.6084632516703786,
+  "win_rate": 0.4550625711035267,
+  "profit_per_trade": -0.22780994331786122,
+  "final_equity": 49.755059823599986,
+  "decision_mode": "single",
+  "backtest_elapsed_seconds": 33.14752793312073,
+  "train_episodes": 19.0,
+  "train_total_trades": 14231.0,
+  "train_avg_trades_per_episode": 749.0,
+  "accepted": false,
+  "acceptance_reason": "total_profit=-200.2449 <= 2.0000; |drawdown|=0.8146 > 0.0800; profit_per_trade=-0.227810 <= 0.000100"
+}

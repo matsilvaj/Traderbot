@@ -979,6 +979,8 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
                         bar_timestamp=str(live_context["bar_timestamp"]),
                     )
                 )
+                position_snapshot = result.get("position_snapshot") or {}
+                position_side = int(position_snapshot.get("side", 0) or 0)
                 cycle_log = {
                     "timestamp": str(result.get("timestamp", "")),
                     "bar_timestamp": str(live_context["bar_timestamp"]),
@@ -991,8 +993,18 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
                     "tie_hold": vote_info.get("tie_hold"),
                     "final_action": float(action),
                     "reference_price": float(live_context["reference_price"]),
+                    "position_side": position_side,
+                    "position_label": "LONG" if position_side > 0 else ("SHORT" if position_side < 0 else "FLAT"),
+                    "position_is_open": position_side != 0,
                     "opened_trade": bool(result.get("opened_position", False)),
+                    "closed_trade": bool(result.get("closed_position", False)),
                     "position_size": float(result.get("position_size", result.get("volume", 0.0) or 0.0)),
+                    "position_avg_entry_price": float(position_snapshot.get("avg_entry_price", 0.0) or 0.0),
+                    "position_unrealized_pnl": float(position_snapshot.get("unrealized_pnl", 0.0) or 0.0),
+                    "position_time_in_bars": float(position_snapshot.get("time_in_position", 0.0) or 0.0),
+                    "entry_distance_from_ema_240": float(
+                        position_snapshot.get("entry_distance_from_ema_240", 0.0) or 0.0
+                    ),
                     "available_to_trade": result.get("available_to_trade"),
                     "available_to_trade_source_field": result.get("available_to_trade_source_field"),
                     "sizing_balance_used": result.get("sizing_balance_used"),
@@ -1175,6 +1187,29 @@ def smoke_hyperliquid_pipeline(
     return payload
 
 
+def close_hyperliquid_position_pipeline(cfg: AppConfig, logger):
+    logger.info(
+        "Fechamento manual Hyperliquid | network=%s execution_mode=%s",
+        cfg.hyperliquid.network,
+        cfg.execution.execution_mode,
+    )
+    executor = HyperliquidExecutor(
+        cfg.hyperliquid,
+        cfg.execution,
+        cfg.environment,
+        stop_loss_pct=cfg.environment.stop_loss_pct,
+        take_profit_pct=cfg.environment.take_profit_pct,
+        slippage_pct=cfg.environment.slippage_pct,
+    )
+    executor.connect()
+    try:
+        payload = executor.close_open_position(trigger="manual_close_from_cli")
+    finally:
+        executor.disconnect()
+    logger.info("Fechamento manual Hyperliquid | %s", json.dumps(payload, ensure_ascii=False))
+    return payload
+
+
 def apply_cli_runtime_overrides(cfg: AppConfig, args, logger) -> AppConfig:
     overrides = []
     if getattr(args, "network_override", None):
@@ -1238,6 +1273,7 @@ def parse_args():
     p_run = sub.add_parser("run", help="Roda loop de inferência e execução (paper/live)")
     p_run.add_argument("--model-path", type=str, default=None, help="Caminho do modelo .zip")
     sub.add_parser("check-hyperliquid", help="Valida conexão Hyperliquid (wallet/rede/símbolo)")
+    sub.add_parser("close-hyperliquid-position", help="Fecha a posição aberta atual na Hyperliquid")
     p_smoke = sub.add_parser(
         "smoke-hyperliquid",
         help="Abre e fecha uma ordem mínima na Hyperliquid para validar execução operacional",
@@ -1298,6 +1334,8 @@ def main():
         run_execution_pipeline(cfg, logger, args.model_path)
     elif args.command == "check-hyperliquid":
         check_hyperliquid_pipeline(cfg, logger)
+    elif args.command == "close-hyperliquid-position":
+        close_hyperliquid_position_pipeline(cfg, logger)
     elif args.command == "smoke-hyperliquid":
         smoke_hyperliquid_pipeline(
             cfg,

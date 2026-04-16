@@ -37,9 +37,17 @@ Thumbs.db
 
 # Project-generated artifacts
 /logs/
-/models/
-/results/
-/archives/
+/models/*
+!/models/*.zip
+!/models/*.pkl
+!/models/**/*
+/results/*
+!/results/*.json
+!/results/**/*.json
+/archives/*
+!/archives/*/
+!/archives/*.json
+!/archives/**/*.json
 
 # Downloaded/local datasets
 /data/*.csv
