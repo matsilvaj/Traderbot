@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
+import requests
 
 from traderbot.config import HyperliquidConfig, TIMEFRAME_MINUTES_MAP
 
@@ -41,7 +42,39 @@ class HLDataLoader:
                 "Pacote hyperliquid-python-sdk não encontrado. Instale as dependências do requirements.txt."
             )
         if self.info is None:
-            self.info = Info(self._base_url(), skip_ws=True)
+            base_url = self._base_url()
+            if str(self.cfg.network).lower().strip() == "testnet":
+                meta = self._info_post(base_url, {"type": "meta"})
+                spot_meta = self._normalize_spot_meta(self._info_post(base_url, {"type": "spotMeta"}))
+                self.info = Info(base_url, skip_ws=True, meta=meta, spot_meta=spot_meta)
+            else:
+                self.info = Info(base_url, skip_ws=True)
+
+    @staticmethod
+    def _info_post(base_url: str, payload: dict) -> dict:
+        response = requests.post(f"{base_url}/info", json=payload, timeout=20)
+        response.raise_for_status()
+        return response.json()
+
+    @staticmethod
+    def _normalize_spot_meta(spot_meta: dict) -> dict:
+        tokens = list(spot_meta.get("tokens", []) or [])
+        universe = list(spot_meta.get("universe", []) or [])
+        max_token_index = -1
+        for item in universe:
+            token_indexes = item.get("tokens", []) or []
+            if token_indexes:
+                max_token_index = max(max_token_index, max(int(idx) for idx in token_indexes))
+        if max_token_index < 0 or len(tokens) > max_token_index:
+            return spot_meta
+
+        dense_tokens: list[dict] = [{"name": f"__missing_{i}", "szDecimals": 0} for i in range(max_token_index + 1)]
+        for idx, token in enumerate(tokens):
+            if idx < len(dense_tokens):
+                dense_tokens[idx] = token
+        normalized = dict(spot_meta)
+        normalized["tokens"] = dense_tokens
+        return normalized
 
     def disconnect(self) -> None:
         if self.info is not None:

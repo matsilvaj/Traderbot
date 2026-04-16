@@ -106,6 +106,16 @@ def _action_bucket(action, hold_threshold: float) -> int:
     return 0
 
 
+def _majority_vote_bucket(raw_actions: list[float], hold_threshold: float) -> tuple[int, dict[int, int]]:
+    buckets = [_action_bucket(action, hold_threshold) for action in raw_actions]
+    counts = {bucket: buckets.count(bucket) for bucket in (-1, 0, 1)}
+    max_votes = max(counts.values()) if counts else 0
+    winners = [bucket for bucket, votes in counts.items() if votes == max_votes]
+    if len(winners) != 1:
+        return 0, counts
+    return winners[0], counts
+
+
 def run_backtest(
     model: PPO,
     df: pd.DataFrame,
@@ -119,29 +129,33 @@ def run_backtest(
     """Executa avaliação fora do treino em dados holdout."""
     env = TradingEnv(df=df, feature_cols=feature_cols, cfg=env_cfg)
     obs_normalizer = _load_obs_normalizer(df, feature_cols, env_cfg, vecnormalize_path=vecnormalize_path)
-    obs, _ = env.reset()
-    total_steps = max(1, len(df) - 1)
-    start_time = time.time()
+    try:
+        obs, _ = env.reset()
+        total_steps = max(1, len(df) - 1)
+        start_time = time.time()
 
-    done = False
-    while not done:
-        action, _ = model.predict(_normalize_obs(obs, obs_normalizer), deterministic=deterministic)
-        obs, _, terminated, truncated, _ = env.step(_coerce_action_array(action))
-        done = terminated or truncated
-        _maybe_log_backtest_progress(
-            logger=logger,
-            start_time=start_time,
-            step_index=env.current_step,
-            total_steps=total_steps,
-            trade_count=env.trade_count,
-            log_interval_steps=log_interval_steps,
-            label="backtest",
-        )
+        done = False
+        while not done:
+            action, _ = model.predict(_normalize_obs(obs, obs_normalizer), deterministic=deterministic)
+            obs, _, terminated, truncated, _ = env.step(_coerce_action_array(action))
+            done = terminated or truncated
+            _maybe_log_backtest_progress(
+                logger=logger,
+                start_time=start_time,
+                step_index=env.current_step,
+                total_steps=total_steps,
+                trade_count=env.trade_count,
+                log_interval_steps=log_interval_steps,
+                label="backtest",
+            )
 
-    metrics = env.get_metrics()
-    metrics["decision_mode"] = "single"
-    metrics["backtest_elapsed_seconds"] = float(time.time() - start_time)
-    return _build_backtest_result(env, metrics)
+        metrics = env.get_metrics()
+        metrics["decision_mode"] = "single"
+        metrics["backtest_elapsed_seconds"] = float(time.time() - start_time)
+        return _build_backtest_result(env, metrics)
+    finally:
+        if obs_normalizer is not None:
+            obs_normalizer.close()
 
 
 def run_backtest_ensemble(
@@ -168,55 +182,73 @@ def run_backtest_ensemble(
             model_entries.append((model_obj, obs_normalizer))
         else:
             model_entries.append((item, default_normalizer))
-    obs, _ = env.reset()
-    total_steps = max(1, len(df) - 1)
-    start_time = time.time()
-    hold_threshold = float(env_cfg.action_hold_threshold)
+    try:
+        obs, _ = env.reset()
+        total_steps = max(1, len(df) - 1)
+        start_time = time.time()
+        hold_threshold = float(env_cfg.action_hold_threshold)
 
-    vote_totals = {-1: 0, 0: 0, 1: 0}
-    tie_steps = 0
-    done = False
-    while not done:
-        raw_actions = [
-            float(
-                np.asarray(
-                    model.predict(_normalize_obs(obs, obs_normalizer), deterministic=deterministic)[0],
-                    dtype=np.float32,
-                ).reshape(-1)[0]
+        vote_totals = {-1: 0, 0: 0, 1: 0}
+        tie_steps = 0
+        done = False
+        while not done:
+            raw_actions = [
+                float(
+                    np.asarray(
+                        model.predict(_normalize_obs(obs, obs_normalizer), deterministic=deterministic)[0],
+                        dtype=np.float32,
+                    ).reshape(-1)[0]
+                )
+                for model, obs_normalizer in model_entries
+            ]
+            winner_bucket, counts = _majority_vote_bucket(raw_actions, hold_threshold)
+            for bucket, count in counts.items():
+                vote_totals[bucket] += count
+
+            if winner_bucket == 1:
+                winner_actions = [abs(raw_action) for raw_action in raw_actions if _action_bucket(raw_action, hold_threshold) == 1]
+                action_value = float(np.mean(winner_actions)) if winner_actions else float(hold_threshold)
+                action = np.array([float(np.clip(max(action_value, hold_threshold), hold_threshold, 1.0))], dtype=np.float32)
+            elif winner_bucket == -1:
+                winner_actions = [abs(raw_action) for raw_action in raw_actions if _action_bucket(raw_action, hold_threshold) == -1]
+                action_value = float(np.mean(winner_actions)) if winner_actions else float(hold_threshold)
+                action = np.array([float(np.clip(-max(action_value, hold_threshold), -1.0, -hold_threshold))], dtype=np.float32)
+            else:
+                action = np.array([0.0], dtype=np.float32)
+
+            if list(counts.values()).count(max(counts.values())) > 1:
+                tie_steps += 1
+
+            obs, _, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            _maybe_log_backtest_progress(
+                logger=logger,
+                start_time=start_time,
+                step_index=env.current_step,
+                total_steps=total_steps,
+                trade_count=env.trade_count,
+                log_interval_steps=log_interval_steps,
+                label="backtest ensemble",
             )
-            for model, obs_normalizer in model_entries
-        ]
-        buckets = [_action_bucket(action, hold_threshold) for action in raw_actions]
-        counts = {bucket: buckets.count(bucket) for bucket in (-1, 0, 1)}
-        for bucket, count in counts.items():
-            vote_totals[bucket] += count
 
-        mean_action = float(np.mean(raw_actions))
-        action = np.array([mean_action], dtype=np.float32)
-        if counts[-1] > 0 and counts[1] > 0 and _action_bucket(action, hold_threshold) == 0:
-            tie_steps += 1
-
-        obs, _, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
-        _maybe_log_backtest_progress(
-            logger=logger,
-            start_time=start_time,
-            step_index=env.current_step,
-            total_steps=total_steps,
-            trade_count=env.trade_count,
-            log_interval_steps=log_interval_steps,
-            label="backtest ensemble",
-        )
-
-    metrics = env.get_metrics()
-    metrics["decision_mode"] = "ensemble_signal_mean"
-    metrics["ensemble_size"] = float(len(models))
-    metrics["vote_hold_total"] = float(vote_totals[0])
-    metrics["vote_buy_total"] = float(vote_totals[1])
-    metrics["vote_sell_total"] = float(vote_totals[-1])
-    metrics["tie_steps"] = float(tie_steps)
-    metrics["backtest_elapsed_seconds"] = float(time.time() - start_time)
-    return _build_backtest_result(env, metrics)
+        metrics = env.get_metrics()
+        metrics["decision_mode"] = "ensemble_majority_vote"
+        metrics["ensemble_size"] = float(len(models))
+        metrics["vote_hold_total"] = float(vote_totals[0])
+        metrics["vote_buy_total"] = float(vote_totals[1])
+        metrics["vote_sell_total"] = float(vote_totals[-1])
+        metrics["tie_steps"] = float(tie_steps)
+        metrics["backtest_elapsed_seconds"] = float(time.time() - start_time)
+        return _build_backtest_result(env, metrics)
+    finally:
+        closed_ids: set[int] = set()
+        if default_normalizer is not None:
+            default_normalizer.close()
+            closed_ids.add(id(default_normalizer))
+        for _, obs_normalizer in model_entries:
+            if obs_normalizer is not None and id(obs_normalizer) not in closed_ids:
+                obs_normalizer.close()
+                closed_ids.add(id(obs_normalizer))
 
 
 def save_backtest_result(result: BacktestResult, results_dir: str, prefix: str) -> dict[str, str]:

@@ -111,16 +111,23 @@ class TrainingConfig:
 
 @dataclass
 class ExecutionConfig:
-    mode: str = "paper"
+    execution_mode: str = "paper_local"
+    decision_mode: str = "ensemble_majority_vote"
+    order_slippage: float = 0.05
     defensive_drawdown_pct: float = 0.02
     defensive_risk_multiplier: float = 0.5
     validation_balance: float = 250.0
     ensemble_enabled: bool = True
+    backtest_ensemble_only: bool = False
+    selected_model_names: list[str] = field(default_factory=list)
     ensemble_model_names: list[str] = field(
         default_factory=lambda: ["ppo_btc_h1_s123", "ppo_btc_h1_s512", "ppo_btc_h1_s2004"]
     )
     allow_live_trading: bool = False
     min_seconds_between_orders: int = 10
+    api_retry_attempts: int = 2
+    api_retry_delay_seconds: int = 3
+    pause_on_error_seconds: int = 60
 
 
 @dataclass
@@ -175,6 +182,17 @@ def _deep_update(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any
 
 
 def _build_config(raw: dict[str, Any]) -> AppConfig:
+    execution_raw = dict(raw.get("execution", {}))
+    if "execution_mode" not in execution_raw and "mode" in execution_raw:
+        legacy_mode = str(execution_raw.get("mode", "")).strip().lower()
+        if legacy_mode == "paper":
+            execution_raw["execution_mode"] = "paper_local"
+        elif legacy_mode in {"live", "exchange"}:
+            execution_raw["execution_mode"] = "exchange"
+        else:
+            execution_raw["execution_mode"] = legacy_mode
+    execution_raw.pop("mode", None)
+
     return AppConfig(
         app_name=raw.get("app_name", "traderbot-rl"),
         paths=PathsConfig(**raw.get("paths", {})),
@@ -184,7 +202,7 @@ def _build_config(raw: dict[str, Any]) -> AppConfig:
         environment=EnvironmentConfig(**raw.get("environment", {})),
         ablation=AblationConfig(**raw.get("ablation", {})),
         training=TrainingConfig(**raw.get("training", {})),
-        execution=ExecutionConfig(**raw.get("execution", {})),
+        execution=ExecutionConfig(**execution_raw),
         retraining=RetrainingConfig(**raw.get("retraining", {})),
     )
 

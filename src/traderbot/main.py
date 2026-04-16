@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import argparse
+import gc
 import json
 import time
 from copy import deepcopy
@@ -24,6 +25,8 @@ from traderbot.rl.backtest import (
 )
 from traderbot.rl.model_manager import RLModelManager
 from traderbot.utils.logger import setup_logger
+
+DEFAULT_MULTI_SEEDS = [1, 7, 21, 42, 84, 123, 256, 512, 999, 2004]
 
 
 def vecnormalize_stats_path(model_path: str | Path) -> Path:
@@ -76,6 +79,80 @@ def log_seed_metrics(logger, seed: int, pain_decay_factor: float, metrics: dict)
         snap["blocked_trade_rate"] * 100.0,
         snap["final_equity"],
     )
+
+
+def _safe_mean(values: list[float]) -> float:
+    return float(np.mean(values)) if values else 0.0
+
+
+def _safe_std(values: list[float]) -> float:
+    return float(np.std(values)) if values else 0.0
+
+
+def build_multi_seed_summary(runs: list[dict], seeds: list[int], acceptance_min_pass_rate: float) -> dict[str, object]:
+    accepted_count = sum(1 for row in runs if row.get("accepted"))
+    pass_rate = (accepted_count / len(runs)) if runs else 0.0
+    total_profits = [float(row.get("total_profit", 0.0)) for row in runs]
+    profit_factors = [float(row.get("profit_factor", 0.0)) for row in runs]
+    max_drawdowns = [float(row.get("max_drawdown", 0.0)) for row in runs]
+
+    return {
+        "num_runs": len(runs),
+        "seeds_used": [int(seed) for seed in seeds],
+        "accepted_runs": accepted_count,
+        "pass_rate": pass_rate,
+        "strategy_accepted": pass_rate >= float(acceptance_min_pass_rate),
+        "avg_total_profit_per_seed": _safe_mean(total_profits),
+        "avg_profit_factor": _safe_mean(profit_factors),
+        "avg_max_drawdown": _safe_mean(max_drawdowns),
+        "std_total_profit": _safe_std(total_profits),
+        "std_profit_factor": _safe_std(profit_factors),
+    }
+
+
+def _latest_multi_seed_summary_path(results_dir: str) -> Path | None:
+    candidates = sorted(
+        Path(results_dir).glob("multi_train_summary_*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def auto_select_model_names(cfg: AppConfig, logger) -> list[str]:
+    if cfg.execution.selected_model_names:
+        selected = [str(name) for name in cfg.execution.selected_model_names]
+        logger.info("Modelos selecionados manualmente via config: %s", selected)
+        return selected
+
+    summary_path = _latest_multi_seed_summary_path(cfg.paths.results_dir)
+    if summary_path is None or not summary_path.exists():
+        logger.info("Nenhum multi_train_summary encontrado; usando ensemble_model_names do config.")
+        return [str(name) for name in cfg.execution.ensemble_model_names]
+
+    with summary_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f) or {}
+
+    selected: list[str] = []
+    for run in payload.get("runs", []):
+        model_name = Path(str(run.get("model_path", ""))).stem
+        profit_factor = float(run.get("profit_factor", 0.0))
+        max_drawdown = abs(float(run.get("max_drawdown", 0.0)))
+        if model_name and profit_factor > 1.10 and max_drawdown < 0.20:
+            selected.append(model_name)
+
+    if selected:
+        logger.info(
+            "Modelos selecionados automaticamente a partir de %s: %s",
+            summary_path.name,
+            selected,
+        )
+        return selected
+
+    logger.info(
+        "Nenhum modelo passou no filtro automático (PF > 1.10 e |DD| < 0.20); usando ensemble_model_names do config."
+    )
+    return [str(name) for name in cfg.execution.ensemble_model_names]
 
 
 def maybe_normalize_obs(obs: np.ndarray, obs_normalizer) -> np.ndarray:
@@ -310,50 +387,63 @@ def train_multi_pipeline(cfg: AppConfig, logger, seeds: list[int]):
             run_cfg.training.model_name,
         )
 
-        _, model_path, result = train_pipeline(run_cfg, logger)
-        metrics = result.metrics
-        summary.append(
-            {
-                "seed": int(seed),
-                "pain_decay_factor": float(run_cfg.environment.pain_decay_factor),
-                "model_path": str(model_path),
-                "total_profit": float(metrics.get("total_profit", 0.0)),
-                "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
-                "num_trades": float(metrics.get("num_trades", 0.0)),
-                "blocked_trades": float(metrics.get("blocked_trades", 0.0)),
-                "blocked_by_regime_filter": float(metrics.get("blocked_by_regime_filter", 0.0)),
-                "trades_allowed_by_regime_filter": float(metrics.get("trades_allowed_by_regime_filter", 0.0)),
-                "pct_bars_with_valid_regime": float(metrics.get("pct_bars_with_valid_regime", 0.0)),
-                "pct_bars_filtered_by_regime": float(metrics.get("pct_bars_filtered_by_regime", 0.0)),
-                "blocked_trade_rate": float(metrics.get("blocked_trade_rate", 0.0)),
-                "win_rate": float(metrics.get("win_rate", 0.0)),
-                "profit_per_trade": float(metrics.get("profit_per_trade", 0.0)),
-                "final_equity": float(metrics.get("final_equity", 0.0)),
-                "exit_by_take_profit": float(metrics.get("exit_by_take_profit", 0.0)),
-                "exit_by_stop_loss": float(metrics.get("exit_by_stop_loss", 0.0)),
-                "exit_by_agent_close": float(metrics.get("exit_by_agent_close", 0.0)),
-                "exit_by_margin_call": float(metrics.get("exit_by_margin_call", 0.0)),
-                "attempted_reversals": float(metrics.get("attempted_reversals", 0.0)),
-                "prevented_same_candle_reversals": float(
-                    metrics.get("prevented_same_candle_reversals", 0.0)
-                ),
-                "average_trade_duration_bars": float(metrics.get("average_trade_duration_bars", 0.0)),
-                "average_win": float(metrics.get("average_win", 0.0)),
-                "average_loss": float(metrics.get("average_loss", 0.0)),
-                "payoff_ratio": float(metrics.get("payoff_ratio", 0.0)),
-                "profit_factor": float(metrics.get("profit_factor", 0.0)),
-                "trades_closed_by_tp_pct": float(metrics.get("trades_closed_by_tp_pct", 0.0)),
-                "trades_closed_by_sl_pct": float(metrics.get("trades_closed_by_sl_pct", 0.0)),
-                "train_total_trades": float(metrics.get("train_total_trades", 0.0)),
-                "accepted": bool(metrics.get("accepted", False)),
-                "acceptance_reason": str(metrics.get("acceptance_reason", "")),
-            }
-        )
-        log_seed_metrics(logger, int(seed), float(run_cfg.environment.pain_decay_factor), metrics)
+        model = None
+        result = None
+        try:
+            model, model_path, result = train_pipeline(run_cfg, logger)
+            metrics = result.metrics
+            summary.append(
+                {
+                    "seed": int(seed),
+                    "pain_decay_factor": float(run_cfg.environment.pain_decay_factor),
+                    "model_path": str(model_path),
+                    "total_profit": float(metrics.get("total_profit", 0.0)),
+                    "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
+                    "num_trades": float(metrics.get("num_trades", 0.0)),
+                    "blocked_trades": float(metrics.get("blocked_trades", 0.0)),
+                    "blocked_by_regime_filter": float(metrics.get("blocked_by_regime_filter", 0.0)),
+                    "trades_allowed_by_regime_filter": float(metrics.get("trades_allowed_by_regime_filter", 0.0)),
+                    "pct_bars_with_valid_regime": float(metrics.get("pct_bars_with_valid_regime", 0.0)),
+                    "pct_bars_filtered_by_regime": float(metrics.get("pct_bars_filtered_by_regime", 0.0)),
+                    "blocked_trade_rate": float(metrics.get("blocked_trade_rate", 0.0)),
+                    "win_rate": float(metrics.get("win_rate", 0.0)),
+                    "profit_per_trade": float(metrics.get("profit_per_trade", 0.0)),
+                    "final_equity": float(metrics.get("final_equity", 0.0)),
+                    "exit_by_take_profit": float(metrics.get("exit_by_take_profit", 0.0)),
+                    "exit_by_stop_loss": float(metrics.get("exit_by_stop_loss", 0.0)),
+                    "exit_by_agent_close": float(metrics.get("exit_by_agent_close", 0.0)),
+                    "exit_by_margin_call": float(metrics.get("exit_by_margin_call", 0.0)),
+                    "attempted_reversals": float(metrics.get("attempted_reversals", 0.0)),
+                    "prevented_same_candle_reversals": float(
+                        metrics.get("prevented_same_candle_reversals", 0.0)
+                    ),
+                    "average_trade_duration_bars": float(metrics.get("average_trade_duration_bars", 0.0)),
+                    "average_win": float(metrics.get("average_win", 0.0)),
+                    "average_loss": float(metrics.get("average_loss", 0.0)),
+                    "payoff_ratio": float(metrics.get("payoff_ratio", 0.0)),
+                    "profit_factor": float(metrics.get("profit_factor", 0.0)),
+                    "trades_closed_by_tp_pct": float(metrics.get("trades_closed_by_tp_pct", 0.0)),
+                    "trades_closed_by_sl_pct": float(metrics.get("trades_closed_by_sl_pct", 0.0)),
+                    "train_total_trades": float(metrics.get("train_total_trades", 0.0)),
+                    "accepted": bool(metrics.get("accepted", False)),
+                    "acceptance_reason": str(metrics.get("acceptance_reason", "")),
+                }
+            )
+            log_seed_metrics(logger, int(seed), float(run_cfg.environment.pain_decay_factor), metrics)
+        finally:
+            if model is not None:
+                try:
+                    env = model.get_env()
+                    if env is not None:
+                        env.close()
+                except Exception:
+                    pass
+                del model
+            if result is not None:
+                del result
+            gc.collect()
 
-    accepted_count = sum(1 for row in summary if row["accepted"])
-    pass_rate = (accepted_count / len(summary)) if summary else 0.0
-    strategy_accepted = pass_rate >= float(cfg.training.acceptance_min_pass_rate)
+    consolidated = build_multi_seed_summary(summary, seeds, float(cfg.training.acceptance_min_pass_rate))
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_path = Path(cfg.paths.results_dir) / f"multi_train_summary_{stamp}.json"
@@ -361,12 +451,7 @@ def train_multi_pipeline(cfg: AppConfig, logger, seeds: list[int]):
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(
             {
-                "summary": {
-                    "num_runs": len(summary),
-                    "accepted_runs": accepted_count,
-                    "pass_rate": pass_rate,
-                    "strategy_accepted": strategy_accepted,
-                },
+                "summary": consolidated,
                 "runs": summary,
             },
             f,
@@ -377,10 +462,19 @@ def train_multi_pipeline(cfg: AppConfig, logger, seeds: list[int]):
     logger.info("Resumo multi-seed salvo em: %s", out_path)
     logger.info(
         "Pass rate multi-seed: %s/%s (%.1f%%) | estratégia aceita=%s",
-        accepted_count,
+        int(consolidated["accepted_runs"]),
         len(summary),
-        pass_rate * 100.0,
-        strategy_accepted,
+        float(consolidated["pass_rate"]) * 100.0,
+        bool(consolidated["strategy_accepted"]),
+    )
+    logger.info(
+        "Resumo consolidado | seeds=%s | lucro_médio=%.2f | PF_médio=%.4f | DD_médio=%.4f | desvio_lucro=%.2f | desvio_PF=%.4f",
+        ",".join(str(seed) for seed in consolidated["seeds_used"]),
+        float(consolidated["avg_total_profit_per_seed"]),
+        float(consolidated["avg_profit_factor"]),
+        float(consolidated["avg_max_drawdown"]),
+        float(consolidated["std_total_profit"]),
+        float(consolidated["std_profit_factor"]),
     )
     for row in summary:
         logger.info(
@@ -438,7 +532,8 @@ def train_ablation_pipeline(cfg: AppConfig, logger, seeds: list[int] | None = No
 
 def load_named_execution_models(cfg: AppConfig, logger) -> list[tuple[str, object]]:
     loaded: list[tuple[str, object]] = []
-    for name in cfg.execution.ensemble_model_names:
+    selected_model_names = auto_select_model_names(cfg, logger)
+    for name in selected_model_names:
         path = Path(cfg.paths.models_dir) / f"{name}.zip"
         if path.exists():
             loaded.append((name, (RLModelManager.load(path), vecnormalize_stats_path(path))))
@@ -480,58 +575,59 @@ def backtest_pipeline(cfg: AppConfig, logger, model_path: str | None):
             )
 
         summary_runs: list[dict] = []
-        for name, model in named_models:
-            logger.info("Backtest individual | modelo=%s", name)
-            model_obj, stats_path = model
-            result = run_backtest(
-                model_obj,
-                test_df,
-                cols,
-                env_cfg,
-                vecnormalize_path=stats_path,
-                logger=logger,
-            )
-            logger.info("%s | %s", name, print_metrics(result.metrics))
-            paths = save_backtest_result(result, cfg.paths.results_dir, f"backtest_{stamp}_{name}")
-            logger.info("Resultados salvos (%s): %s", name, paths)
-            summary_runs.append(
-                {
-                    "model_name": name,
-                    "decision_mode": str(result.metrics.get("decision_mode", "single")),
-                    "total_profit": float(result.metrics.get("total_profit", 0.0)),
-                    "max_drawdown": float(result.metrics.get("max_drawdown", 0.0)),
-                    "num_trades": float(result.metrics.get("num_trades", 0.0)),
-                    "blocked_trades": float(result.metrics.get("blocked_trades", 0.0)),
-                    "blocked_by_regime_filter": float(result.metrics.get("blocked_by_regime_filter", 0.0)),
-                    "trades_allowed_by_regime_filter": float(
-                        result.metrics.get("trades_allowed_by_regime_filter", 0.0)
-                    ),
-                    "pct_bars_with_valid_regime": float(result.metrics.get("pct_bars_with_valid_regime", 0.0)),
-                    "pct_bars_filtered_by_regime": float(
-                        result.metrics.get("pct_bars_filtered_by_regime", 0.0)
-                    ),
-                    "win_rate": float(result.metrics.get("win_rate", 0.0)),
-                    "profit_per_trade": float(result.metrics.get("profit_per_trade", 0.0)),
-                    "final_equity": float(result.metrics.get("final_equity", 0.0)),
-                    "exit_by_take_profit": float(result.metrics.get("exit_by_take_profit", 0.0)),
-                    "exit_by_stop_loss": float(result.metrics.get("exit_by_stop_loss", 0.0)),
-                    "exit_by_agent_close": float(result.metrics.get("exit_by_agent_close", 0.0)),
-                    "exit_by_margin_call": float(result.metrics.get("exit_by_margin_call", 0.0)),
-                    "attempted_reversals": float(result.metrics.get("attempted_reversals", 0.0)),
-                    "prevented_same_candle_reversals": float(
-                        result.metrics.get("prevented_same_candle_reversals", 0.0)
-                    ),
-                    "average_trade_duration_bars": float(
-                        result.metrics.get("average_trade_duration_bars", 0.0)
-                    ),
-                    "average_win": float(result.metrics.get("average_win", 0.0)),
-                    "average_loss": float(result.metrics.get("average_loss", 0.0)),
-                    "payoff_ratio": float(result.metrics.get("payoff_ratio", 0.0)),
-                    "profit_factor": float(result.metrics.get("profit_factor", 0.0)),
-                    "trades_closed_by_tp_pct": float(result.metrics.get("trades_closed_by_tp_pct", 0.0)),
-                    "trades_closed_by_sl_pct": float(result.metrics.get("trades_closed_by_sl_pct", 0.0)),
-                }
-            )
+        if not cfg.execution.backtest_ensemble_only:
+            for name, model in named_models:
+                logger.info("Backtest individual | modelo=%s", name)
+                model_obj, stats_path = model
+                result = run_backtest(
+                    model_obj,
+                    test_df,
+                    cols,
+                    env_cfg,
+                    vecnormalize_path=stats_path,
+                    logger=logger,
+                )
+                logger.info("%s | %s", name, print_metrics(result.metrics))
+                paths = save_backtest_result(result, cfg.paths.results_dir, f"backtest_{stamp}_{name}")
+                logger.info("Resultados salvos (%s): %s", name, paths)
+                summary_runs.append(
+                    {
+                        "model_name": name,
+                        "decision_mode": str(result.metrics.get("decision_mode", "single")),
+                        "total_profit": float(result.metrics.get("total_profit", 0.0)),
+                        "max_drawdown": float(result.metrics.get("max_drawdown", 0.0)),
+                        "num_trades": float(result.metrics.get("num_trades", 0.0)),
+                        "blocked_trades": float(result.metrics.get("blocked_trades", 0.0)),
+                        "blocked_by_regime_filter": float(result.metrics.get("blocked_by_regime_filter", 0.0)),
+                        "trades_allowed_by_regime_filter": float(
+                            result.metrics.get("trades_allowed_by_regime_filter", 0.0)
+                        ),
+                        "pct_bars_with_valid_regime": float(result.metrics.get("pct_bars_with_valid_regime", 0.0)),
+                        "pct_bars_filtered_by_regime": float(
+                            result.metrics.get("pct_bars_filtered_by_regime", 0.0)
+                        ),
+                        "win_rate": float(result.metrics.get("win_rate", 0.0)),
+                        "profit_per_trade": float(result.metrics.get("profit_per_trade", 0.0)),
+                        "final_equity": float(result.metrics.get("final_equity", 0.0)),
+                        "exit_by_take_profit": float(result.metrics.get("exit_by_take_profit", 0.0)),
+                        "exit_by_stop_loss": float(result.metrics.get("exit_by_stop_loss", 0.0)),
+                        "exit_by_agent_close": float(result.metrics.get("exit_by_agent_close", 0.0)),
+                        "exit_by_margin_call": float(result.metrics.get("exit_by_margin_call", 0.0)),
+                        "attempted_reversals": float(result.metrics.get("attempted_reversals", 0.0)),
+                        "prevented_same_candle_reversals": float(
+                            result.metrics.get("prevented_same_candle_reversals", 0.0)
+                        ),
+                        "average_trade_duration_bars": float(
+                            result.metrics.get("average_trade_duration_bars", 0.0)
+                        ),
+                        "average_win": float(result.metrics.get("average_win", 0.0)),
+                        "average_loss": float(result.metrics.get("average_loss", 0.0)),
+                        "payoff_ratio": float(result.metrics.get("payoff_ratio", 0.0)),
+                        "profit_factor": float(result.metrics.get("profit_factor", 0.0)),
+                        "trades_closed_by_tp_pct": float(result.metrics.get("trades_closed_by_tp_pct", 0.0)),
+                        "trades_closed_by_sl_pct": float(result.metrics.get("trades_closed_by_sl_pct", 0.0)),
+                    }
+                )
 
         ensemble_result = run_backtest_ensemble(
             [model for _, model in named_models],
@@ -636,7 +732,7 @@ def build_live_observation(
     executor: HyperliquidExecutor,
     feature_cols: list[str],
     fe: FeatureEngineer,
-) -> tuple[np.ndarray, dict[str, float]]:
+) -> tuple[np.ndarray, dict[str, object]]:
     df = executor.get_live_market_window()
     feat = fe.build(df)
     feat_raw = feat.copy()
@@ -659,17 +755,17 @@ def build_live_observation(
         take_move = (
             ((entry_price * (1.0 + cfg.environment.take_profit_pct * side)) - current_price) / entry_price
         ) * side
-        entry_distance_from_ema_240 = float(
-            position_snapshot.get(
-                "entry_distance_from_ema_240",
-                (entry_price - float(latest_raw.get("ema_240", entry_price)))
-                / (float(latest_raw.get("ema_240", entry_price)) + 1e-12),
-            )
-        )
+        entry_distance_from_ema_240 = float(position_snapshot.get("entry_distance_from_ema_240", 0.0))
     else:
         stop_move = 0.0
         take_move = 0.0
         entry_distance_from_ema_240 = 0.0
+    regime_dist_ema_240 = float(latest_raw.get("regime_dist_ema_240_raw", latest_raw.get("dist_ema_240", 0.0)))
+    regime_vol_regime_z = float(latest_raw.get("regime_vol_regime_z_raw", latest_raw.get("vol_regime_z", 0.0)))
+    regime_valid = (
+        abs(regime_dist_ema_240) >= float(cfg.environment.regime_min_abs_dist_ema_240)
+        and regime_vol_regime_z > float(cfg.environment.regime_min_vol_regime_z)
+    )
     extras = np.array(
         [
             side,
@@ -683,6 +779,11 @@ def build_live_observation(
     )
     live_context = {
         "entry_distance_from_ema_240": float(latest_raw.get("dist_ema_240", 0.0)),
+        "reference_price": current_price,
+        "bar_timestamp": latest_raw.name.isoformat() if hasattr(latest_raw.name, "isoformat") else str(latest_raw.name),
+        "regime_valid_for_entry": bool(regime_valid),
+        "regime_dist_ema_240": regime_dist_ema_240,
+        "regime_vol_regime_z": regime_vol_regime_z,
     }
     return np.concatenate([obs, extras]).astype(np.float32, copy=False), live_context
 
@@ -720,10 +821,25 @@ def load_execution_models(cfg: AppConfig, logger):
     return RLModelManager.load(path), vecnormalize_stats_path(path)
 
 
-def execution_models_available(cfg: AppConfig) -> bool:
+def execution_models_available(cfg: AppConfig, logger) -> bool:
     if cfg.execution.ensemble_enabled:
-        return any((Path(cfg.paths.models_dir) / f"{name}.zip").exists() for name in cfg.execution.ensemble_model_names)
+        selected_model_names = auto_select_model_names(cfg, logger)
+        return any((Path(cfg.paths.models_dir) / f"{name}.zip").exists() for name in selected_model_names)
     return (Path(cfg.paths.models_dir) / f"{cfg.training.model_name}.zip").exists()
+
+
+def majority_vote_bucket(raw_actions: list[float], hold_threshold: float) -> tuple[int, dict[str, int]]:
+    buckets = [action_bucket(raw_action, hold_threshold) for raw_action in raw_actions]
+    counts = {
+        "buy": buckets.count(1),
+        "hold": buckets.count(0),
+        "sell": buckets.count(-1),
+    }
+    max_votes = max(counts.values()) if counts else 0
+    winners = [label for label, votes in counts.items() if votes == max_votes]
+    if len(winners) != 1:
+        return 0, counts
+    return {"buy": 1, "hold": 0, "sell": -1}[winners[0]], counts
 
 
 def infer_latest_action_ensemble(models, obs: np.ndarray, hold_threshold: float):
@@ -743,19 +859,25 @@ def infer_latest_action_ensemble(models, obs: np.ndarray, hold_threshold: float)
         model_obs = maybe_normalize_obs(obs, obs_normalizer)
         raw_actions.append(infer_latest_action(model, model_obs))
 
-    mean_action = float(np.mean(raw_actions)) if raw_actions else 0.0
-    buckets = [action_bucket(raw_action, hold_threshold) for raw_action in raw_actions]
-    counts = {label: 0 for label in ("buy", "hold", "sell")}
-    for bucket in buckets:
-        counts[action_bucket_label(bucket)] += 1
+    winner_bucket, counts = majority_vote_bucket(raw_actions, hold_threshold)
+    if winner_bucket == 1:
+        winner_actions = [abs(raw_action) for raw_action in raw_actions if action_bucket(raw_action, hold_threshold) == 1]
+        action_value = float(np.mean(winner_actions)) if winner_actions else float(hold_threshold)
+        final_action = float(np.clip(max(action_value, hold_threshold), hold_threshold, 1.0))
+    elif winner_bucket == -1:
+        winner_actions = [abs(raw_action) for raw_action in raw_actions if action_bucket(raw_action, hold_threshold) == -1]
+        action_value = float(np.mean(winner_actions)) if winner_actions else float(hold_threshold)
+        final_action = float(np.clip(-max(action_value, hold_threshold), -1.0, -hold_threshold))
+    else:
+        final_action = 0.0
 
-    return mean_action, {
+    return final_action, {
         "mode": "ensemble",
         "raw_actions": [float(x) for x in raw_actions],
-        "mean_action": mean_action,
-        "bucket": action_bucket_label(action_bucket(mean_action, hold_threshold)),
+        "final_action": final_action,
+        "bucket": action_bucket_label(winner_bucket),
         "votes": counts,
-        "neutral_conflict": counts["buy"] > 0 and counts["sell"] > 0 and action_bucket(mean_action, hold_threshold) == 0,
+        "tie_hold": counts["buy"] == counts["sell"] or list(counts.values()).count(max(counts.values())) > 1,
     }
 
 
@@ -798,7 +920,7 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
         if not path.exists():
             raise FileNotFoundError(f"Modelo não encontrado em {path}")
         models = (RLModelManager.load(path), vecnormalize_stats_path(path))
-    elif not execution_models_available(cfg):
+    elif not execution_models_available(cfg, logger):
         logger.info("Modelo não encontrado, treinando novo modelo...")
         _, _, _ = train_pipeline(cfg, logger)
         models = load_execution_models(cfg, logger)
@@ -820,30 +942,107 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
         slippage_pct=cfg.environment.slippage_pct,
     )
     executor.connect()
-    logger.info("Executor conectado no modo: %s", cfg.execution.mode)
+    runtime_balance_context = executor.get_sizing_balance_context(cfg.execution.execution_mode)
+    logger.info(
+        "Executor conectado | network=%s | execution_mode=%s | base_url=%s | decision_mode=%s | modelos=%s | available_to_trade=%.2f | sizing_balance_used=%.2f | saldo_fonte=%s | order_slippage=%.4f | model_slippage=%.5f",
+        cfg.hyperliquid.network,
+        cfg.execution.execution_mode,
+        executor._base_url(),
+        cfg.execution.decision_mode,
+        cfg.execution.selected_model_names if cfg.execution.selected_model_names else "auto",
+        float(runtime_balance_context.get("available_to_trade", 0.0)),
+        float(runtime_balance_context.get("sizing_balance_used", 0.0)),
+        str(runtime_balance_context.get("sizing_balance_source")),
+        float(cfg.execution.order_slippage),
+        float(cfg.environment.slippage_pct),
+    )
     last_retrain = time.time()
 
     try:
         while True:
-            obs, live_context = build_live_observation(cfg, executor, cols, fe)
-            action, vote_info = infer_latest_action_ensemble(
-                model_entries,
-                obs,
-                float(cfg.environment.action_hold_threshold),
-            )
-            result = executor.execute(
-                ExecutionDecision(
-                    action=action,
-                    reason=f"ação inferida pelo PPO ({json.dumps(vote_info, ensure_ascii=False)})",
-                    entry_distance_from_ema_240=float(live_context["entry_distance_from_ema_240"]),
+            try:
+                obs, live_context = build_live_observation(cfg, executor, cols, fe)
+                action, vote_info = infer_latest_action_ensemble(
+                    model_entries,
+                    obs,
+                    float(env_cfg.action_hold_threshold),
                 )
-            )
-            logger.info(
-                "Decisão=%s | Votos=%s | Resultado=%s",
-                action,
-                json.dumps(vote_info, ensure_ascii=False),
-                json.dumps(result, ensure_ascii=False),
-            )
+                result = executor.execute(
+                    ExecutionDecision(
+                        action=action,
+                        reason=f"ação inferida pelo PPO ({json.dumps(vote_info, ensure_ascii=False)})",
+                        entry_distance_from_ema_240=float(live_context["entry_distance_from_ema_240"]),
+                        regime_valid_for_entry=bool(live_context["regime_valid_for_entry"]),
+                        regime_dist_ema_240=float(live_context["regime_dist_ema_240"]),
+                        regime_vol_regime_z=float(live_context["regime_vol_regime_z"]),
+                        reference_price=float(live_context["reference_price"]),
+                        bar_timestamp=str(live_context["bar_timestamp"]),
+                    )
+                )
+                cycle_log = {
+                    "timestamp": str(result.get("timestamp", "")),
+                    "bar_timestamp": str(live_context["bar_timestamp"]),
+                    "decision_mode": str(cfg.execution.decision_mode),
+                    "regime_valid": bool(live_context["regime_valid_for_entry"]),
+                    "regime_dist_ema_240": float(live_context["regime_dist_ema_240"]),
+                    "regime_vol_regime_z": float(live_context["regime_vol_regime_z"]),
+                    "votes": vote_info.get("votes"),
+                    "vote_bucket": vote_info.get("bucket"),
+                    "tie_hold": vote_info.get("tie_hold"),
+                    "final_action": float(action),
+                    "reference_price": float(live_context["reference_price"]),
+                    "opened_trade": bool(result.get("opened_position", False)),
+                    "position_size": float(result.get("position_size", result.get("volume", 0.0) or 0.0)),
+                    "available_to_trade": result.get("available_to_trade"),
+                    "available_to_trade_source_field": result.get("available_to_trade_source_field"),
+                    "sizing_balance_used": result.get("sizing_balance_used"),
+                    "sizing_balance_source": result.get("sizing_balance_source"),
+                    "network": result.get("network"),
+                    "order_slippage": float(getattr(cfg.execution, "order_slippage", 0.0)),
+                    "model_slippage_pct": float(cfg.environment.slippage_pct),
+                    "risk_pct": result.get("risk_pct"),
+                    "risk_amount": result.get("risk_amount"),
+                    "stop_loss_pct": result.get("stop_loss_pct"),
+                    "stop_distance_price": result.get("stop_distance_price"),
+                    "target_notional": result.get("target_notional"),
+                    "raw_volume": result.get("raw_volume"),
+                    "adjusted_volume": result.get("adjusted_volume"),
+                    "adjusted_notional": result.get("adjusted_notional"),
+                    "notional_value": result.get("notional_value"),
+                    "min_notional_usd": result.get("min_notional_usd"),
+                    "blocked_by_min_notional": result.get("blocked_by_min_notional"),
+                    "bumped_to_min_notional": result.get("bumped_to_min_notional"),
+                    "effective_risk_amount": result.get("effective_risk_amount"),
+                    "exceeds_target_risk": result.get("exceeds_target_risk"),
+                    "skipped_due_to_min_notional_risk": result.get("skipped_due_to_min_notional_risk"),
+                    "leverage_configured": result.get("leverage_configured"),
+                    "leverage_applied": result.get("leverage_applied"),
+                    "leverage_used": result.get("leverage_used"),
+                    "margin_estimated_consumed": result.get("margin_estimated_consumed"),
+                    "has_explicit_leverage_logic": result.get("has_explicit_leverage_logic"),
+                    "blocked_reason": result.get("blocked_reason"),
+                    "error": result.get("error"),
+                    "stop_loss_price": result.get("stop_loss_price"),
+                    "take_profit_price": result.get("take_profit_price"),
+                    "exit_reason": result.get("exit_reason") or (
+                        result.get("stop_take_event", {}) or {}
+                    ).get("trigger"),
+                    "force_exit_only_by_tp_sl": bool(result.get("force_exit_only_by_tp_sl", False)),
+                    "ignored_signal": bool(result.get("ignored_signal", False)),
+                    "attempted_reversal": bool(result.get("attempted_reversal", False)),
+                    "prevented_same_candle_reversal": bool(
+                        result.get("prevented_same_candle_reversal", False)
+                    ),
+                }
+                logger.info("Ciclo runtime HL | %s", json.dumps(cycle_log, ensure_ascii=False))
+            except Exception:
+                pause_seconds = max(1.0, float(cfg.execution.pause_on_error_seconds))
+                logger.exception(
+                    "Erro no ciclo do runtime Hyperliquid; pausando %.1fs antes de tentar novamente.",
+                    pause_seconds,
+                )
+                time.sleep(pause_seconds)
+                continue
 
             if cfg.retraining.enabled:
                 interval_s = cfg.retraining.interval_minutes * 60
@@ -887,10 +1086,15 @@ def check_hyperliquid_pipeline(cfg: AppConfig, logger):
         status = executor.check_connection()
         spec = executor.get_symbol_trading_spec()
         risk_state = executor.get_account_risk_state()
+        sizing_context = executor.get_sizing_balance_context(cfg.execution.execution_mode)
+        sizing_balance = float(sizing_context.get("sizing_balance_used", 0.0))
         validation_sizing = executor.calculate_order_volume(
-            balance=cfg.execution.validation_balance,
+            balance=sizing_balance,
             dynamic_risk_pct=float(cfg.environment.max_risk_per_trade),
             defensive=False,
+            available_to_trade=float(sizing_context.get("available_to_trade", 0.0)),
+            available_to_trade_source_field=str(sizing_context.get("available_to_trade_source_field")),
+            sizing_balance_source=str(sizing_context.get("sizing_balance_source")),
         )
         status["trading_spec"] = {
             "volume_min": spec.volume_min,
@@ -899,11 +1103,76 @@ def check_hyperliquid_pipeline(cfg: AppConfig, logger):
             "contract_size": spec.contract_size,
             "point": spec.point,
         }
+        status["execution_mode"] = cfg.execution.execution_mode
+        status["available_to_trade_source_field"] = sizing_context.get("available_to_trade_source_field")
+        status["sizing_balance_used"] = sizing_balance
+        status["sizing_balance_source"] = sizing_context.get("sizing_balance_source")
         status["validation_sizing"] = validation_sizing
         status["account_risk_state"] = risk_state
     finally:
         executor.disconnect()
     logger.info("Status Hyperliquid: %s", json.dumps(status, ensure_ascii=False))
+
+
+def smoke_hyperliquid_pipeline(
+    cfg: AppConfig,
+    logger,
+    side: str = "buy",
+    wait_seconds: float = 3.0,
+    order_slippage: float | None = None,
+    network_override: str | None = None,
+    allow_mainnet: bool = False,
+):
+    smoke_cfg = deepcopy(cfg)
+    if network_override:
+        smoke_cfg.hyperliquid.network = str(network_override).lower().strip()
+    smoke_cfg.execution.execution_mode = "exchange"
+    smoke_cfg.execution.allow_live_trading = True
+
+    network = str(smoke_cfg.hyperliquid.network).lower().strip()
+    if network == "mainnet" and not allow_mainnet:
+        raise RuntimeError(
+            "Smoke test em mainnet bloqueado por segurança. Use --allow-mainnet para confirmar."
+        )
+
+    env_cfg = prepare_runtime_environment_cfg(smoke_cfg, logger)
+    effective_smoke_slippage = float(
+        cfg.execution.order_slippage if order_slippage is None else order_slippage
+    )
+    logger.info(
+        "Smoke test Hyperliquid | network=%s | execution_mode=%s | side=%s | wait_seconds=%.1f | smoke_slippage=%.4f",
+        smoke_cfg.hyperliquid.network,
+        smoke_cfg.execution.execution_mode,
+        str(side).lower().strip(),
+        float(wait_seconds),
+        effective_smoke_slippage,
+    )
+    executor = HyperliquidExecutor(
+        smoke_cfg.hyperliquid,
+        smoke_cfg.execution,
+        env_cfg,
+        stop_loss_pct=smoke_cfg.environment.stop_loss_pct,
+        take_profit_pct=smoke_cfg.environment.take_profit_pct,
+        slippage_pct=smoke_cfg.environment.slippage_pct,
+    )
+    executor.connect()
+    try:
+        payload = executor.run_smoke_test(
+            side=side,
+            wait_seconds=wait_seconds,
+            order_slippage=effective_smoke_slippage,
+        )
+    finally:
+        executor.disconnect()
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = Path(smoke_cfg.paths.results_dir) / f"smoke_hyperliquid_{stamp}_{network}.json"
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    logger.info("Resultado smoke salvo em: %s", output_path)
+    logger.info("Smoke test Hyperliquid | %s", json.dumps(payload, ensure_ascii=False))
+    return payload
 
 
 def parse_args():
@@ -917,8 +1186,8 @@ def parse_args():
     p_train_multi.add_argument(
         "--seeds",
         type=str,
-        default="1,7,21,42,84,123,256,512,999,2024",
-        help="Lista de seeds separadas por vírgula. Ex: 1,7,21,42,84,123,256,512,999,2024",
+        default=",".join(str(seed) for seed in DEFAULT_MULTI_SEEDS),
+        help="Lista de 10 seeds separadas por vírgula. Ex: 1,7,21,42,84,123,256,512,999,2004",
     )
 
     p_backtest = sub.add_parser("backtest", help="Avalia modelo salvo")
@@ -928,6 +1197,34 @@ def parse_args():
     p_run.add_argument("--model-path", type=str, default=None, help="Caminho do modelo .zip")
     sub.add_parser("check-hyperliquid", help="Valida conexão Hyperliquid (wallet/rede/símbolo)")
     sub.add_parser("check-mt5", help="Alias legado do check-hyperliquid")
+    p_smoke = sub.add_parser(
+        "smoke-hyperliquid",
+        help="Abre e fecha uma ordem mínima na Hyperliquid para validar execução operacional",
+    )
+    p_smoke.add_argument("--side", choices=["buy", "sell"], default="buy", help="Lado da ordem do smoke test")
+    p_smoke.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=3.0,
+        help="Tempo de espera entre abertura e fechamento manual do smoke test",
+    )
+    p_smoke.add_argument(
+        "--smoke-slippage",
+        type=float,
+        default=None,
+        help="Slippage operacional do smoke test para cruzar o livro com ordem IOC",
+    )
+    p_smoke.add_argument(
+        "--network",
+        choices=["mainnet", "testnet"],
+        default=None,
+        help="Override opcional da rede só para o smoke test",
+    )
+    p_smoke.add_argument(
+        "--allow-mainnet",
+        action="store_true",
+        help="Confirma explicitamente o smoke test na mainnet",
+    )
 
     return parser.parse_args()
 
@@ -959,6 +1256,16 @@ def main():
         run_execution_pipeline(cfg, logger, args.model_path)
     elif args.command in {"check-hyperliquid", "check-mt5"}:
         check_hyperliquid_pipeline(cfg, logger)
+    elif args.command == "smoke-hyperliquid":
+        smoke_hyperliquid_pipeline(
+            cfg,
+            logger,
+            side=args.side,
+            wait_seconds=args.wait_seconds,
+            order_slippage=args.smoke_slippage,
+            network_override=args.network,
+            allow_mainnet=bool(args.allow_mainnet),
+        )
     else:
         raise ValueError("Comando inválido")
 

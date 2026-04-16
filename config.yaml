@@ -10,7 +10,7 @@ hyperliquid:
   enabled: true
   wallet_address: null  # Deixe null para ler do .env
   private_key: null     # Deixe null para ler do .env
-  network: mainnet      # mainnet ou testnet
+  network: testnet      # mainnet ou testnet
   symbol: BTC           # Na HL o ativo é apenas BTC (e não BTCUSD)
   timeframe: 1h         # Formato CCXT/HL
   history_bars: 10000
@@ -31,7 +31,7 @@ features:
 environment:
   initial_balance: 250.0
   simulation_initial_balance: 250.0
-  max_risk_per_trade: 0.01
+  max_risk_per_trade: 0.005
   min_risk_per_trade: 0.001
   action_hold_threshold: 0.65
   regime_min_abs_dist_ema_240: 0.025
@@ -72,7 +72,7 @@ ablation:
     - 0.002
 
 training:
-  total_timesteps: 1000000
+  total_timesteps: 10000000
   learning_rate: 0.0003
   n_steps: 8192
   batch_size: 1024
@@ -95,17 +95,25 @@ training:
   acceptance_min_pass_rate: 0.4
 
 execution:
-  mode: paper
+  execution_mode: exchange
+  decision_mode: ensemble_majority_vote
+  order_slippage: 0.05
   defensive_drawdown_pct: 0.02
   defensive_risk_multiplier: 0.5
   validation_balance: 250.0
   ensemble_enabled: true
-  ensemble_model_names:
-    - ppo_btc_h1_s123
+  backtest_ensemble_only: false
+  selected_model_names:
+    - ppo_btc_h1_s1
+    - ppo_btc_h1_s21
+    - ppo_btc_h1_s256
     - ppo_btc_h1_s512
-    - ppo_btc_h1_s2004
-  allow_live_trading: false
+    - ppo_btc_h1_s999
+  allow_live_trading: true
   min_seconds_between_orders: 10
+  api_retry_attempts: 2
+  api_retry_delay_seconds: 3
+  pause_on_error_seconds: 60
 
 retraining:
   enabled: false

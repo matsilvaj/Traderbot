@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from stable_baselines3 import PPO
@@ -36,7 +37,8 @@ class RLModelManager:
         """Envolve ambiente no formato esperado pelo SB3."""
         num_envs = max(1, int(self.cfg.num_envs))
         env_fns = [env_fn for _ in range(num_envs)]
-        if num_envs > 1:
+        use_subproc = num_envs > 1 and os.name != "nt"
+        if use_subproc:
             try:
                 base_env = VecMonitor(SubprocVecEnv(env_fns, start_method="spawn"))
             except Exception:
