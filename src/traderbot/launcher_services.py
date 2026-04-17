@@ -80,7 +80,13 @@ class LauncherEvent:
         return self.payload
 
 
-HumanizedEvent = LauncherEvent
+@dataclass(slots=True)
+class HumanizedEvent(LauncherEvent):
+    market_state: str = ""
+    model_interpretation: str = ""
+    filters_diagnostic: str = ""
+    execution_summary: str = ""
+    simple_summary: str = ""
 
 
 STATE_COLORS = {
@@ -90,6 +96,47 @@ STATE_COLORS = {
     "execution": "purple",
     "risk": "orange",
     "blocked": "gray",
+}
+
+
+AI_HUMANIZED_DETAILS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "market_state": {"type": "string"},
+        "model_interpretation": {"type": "string"},
+        "filters_diagnostic": {"type": "string"},
+        "execution_summary": {"type": "string"},
+        "simple_summary": {"type": "string"},
+    },
+    "required": [
+        "market_state",
+        "model_interpretation",
+        "filters_diagnostic",
+        "execution_summary",
+        "simple_summary",
+    ],
+}
+
+
+AI_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "severity": {
+            "type": "string",
+            "enum": ["info", "warning", "error", "execution", "risk", "blocked"],
+        },
+        "message": {"type": "string"},
+        "details": {"type": ["string", "null"]},
+        "color": {
+            "type": "string",
+            "enum": ["blue", "yellow", "red", "purple", "orange", "gray"],
+        },
+        "relevant": {"type": "boolean"},
+        "humanized_details": AI_HUMANIZED_DETAILS_SCHEMA,
+    },
+    "required": ["severity", "message", "details", "color", "relevant", "humanized_details"],
 }
 
 
@@ -479,6 +526,7 @@ class OpenAILogTranslator:
             "network": event.network,
             "symbol": event.symbol,
             "timeframe": event.timeframe,
+            "payload": event.metadata,
             "fallback": {
                 "severity": fallback.severity,
                 "message_human": fallback.message_human,
@@ -486,6 +534,11 @@ class OpenAILogTranslator:
                 "color": fallback.color,
                 "relevant": fallback.relevant,
                 "event_code": fallback.event_code,
+                "market_state": fallback.market_state,
+                "model_interpretation": fallback.model_interpretation,
+                "filters_diagnostic": fallback.filters_diagnostic,
+                "execution_summary": fallback.execution_summary,
+                "simple_summary": fallback.simple_summary,
             },
         }
         serialized = json.dumps(raw_payload, ensure_ascii=False, sort_keys=True, default=str)
@@ -503,17 +556,17 @@ class OpenAILogTranslator:
 
         try:
             client = OpenAI(api_key=self.api_key, timeout=float(self.cfg.launcher.openai_timeout_seconds))
-            schema = {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "severity": {"type": "string", "enum": ["info", "warning", "error", "execution", "risk", "blocked"]},
-                    "message": {"type": "string"},
-                    "details": {"type": ["string", "null"]},
-                    "color": {"type": "string", "enum": ["blue", "yellow", "red", "purple", "orange", "gray"]},
-                    "relevant": {"type": "boolean"},
-                },
-                "required": ["severity", "message", "details", "color", "relevant"],
+            metadata = event.metadata if isinstance(event.metadata, dict) else {}
+            feature_snapshot = metadata.get("feature_snapshot")
+            cycle_metrics = {
+                "market_snapshot": metadata.get("market_snapshot"),
+                "feature_snapshot": feature_snapshot,
+                "features_snapshot": feature_snapshot if feature_snapshot is not None else metadata.get("features_snapshot"),
+                "decision": metadata.get("decision"),
+                "filters": metadata.get("filters"),
+                "execution": metadata.get("execution"),
+                "sizing": metadata.get("sizing"),
+                "system_state": metadata.get("system_state"),
             }
             structured_input = {
                 "timestamp": event.timestamp.isoformat(),
@@ -526,7 +579,15 @@ class OpenAILogTranslator:
                 "network": event.network,
                 "symbol": event.symbol,
                 "timeframe": event.timeframe,
-                "metadata": event.metadata,
+                "metadata": metadata,
+                "cycle_metrics": cycle_metrics,
+                "fallback_humanized_details": {
+                    "market_state": fallback.market_state,
+                    "model_interpretation": fallback.model_interpretation,
+                    "filters_diagnostic": fallback.filters_diagnostic,
+                    "execution_summary": fallback.execution_summary,
+                    "simple_summary": fallback.simple_summary,
+                },
             }
             raw_log = event.message_raw or event.message_human or json.dumps(event.metadata, ensure_ascii=False)
             response = client.responses.create(
@@ -538,18 +599,28 @@ class OpenAILogTranslator:
                             {
                                 "type": "input_text",
                                 "text": (
-                                    "Voce e um interpretador de logs de um bot de trading.\n\n"
+                                    "Voce e um interpretador de logs e metricas de um bot de trading.\n\n"
+                                    "INSTRUCAO CRITICA:\n"
+                                    "- Voce deve agir como um analista de trading relatando as metricas de forma limpa, direta, estruturada e SEM EMOJIS.\n\n"
                                     "Sua funcao:\n"
                                     "- traduzir logs tecnicos para linguagem humana\n"
-                                    "- resumir ao maximo\n"
+                                    "- resumir o que importa operacionalmente\n"
                                     "- remover ruido tecnico\n"
-                                    "- focar apenas no que importa operacionalmente\n\n"
+                                    "- analisar todos os blocos de ciclo disponiveis: market_snapshot, feature_snapshot/features_snapshot, decision, filters e execution\n"
+                                    "- preencher humanized_details para abastecer a aba Detalhes do launcher\n\n"
                                     "REGRAS:\n"
-                                    "- maximo 1 frase (ideal)\n"
                                     "- nunca repetir o log original\n"
-                                    "- nunca explicar demais\n"
-                                    "- remover wallet, base_url, ids, etc\n"
-                                    "- linguagem direta e objetiva\n\n"
+                                    "- nunca expor wallet, base_url, ids, hashes internos ou JSON bruto\n"
+                                    "- linguagem direta, objetiva e humana\n"
+                                    "- se algum bloco do ciclo nao existir, escreva uma frase curta informando isso em vez de deixar vazio\n"
+                                    "- message deve ser curta e operacional\n"
+                                    "- details pode ser null ou uma explicacao curta complementar\n\n"
+                                    "HUMANIZED_DETAILS:\n"
+                                    "- market_state: estado do mercado com preco, RSI, distancia de EMA e volume quando houver\n"
+                                    "- model_interpretation: interpretacao do modelo, bucket, confianca e contagem de votos\n"
+                                    "- filters_diagnostic: diagnostico dos filtros, bloqueios e regime de mercado\n"
+                                    "- execution_summary: status operacional da execucao e da posicao, incluindo FLAT quando aplicavel\n"
+                                    "- simple_summary: resumo curto e direto de toda a situacao\n\n"
                                     "CLASSIFICACAO:\n"
                                     "- info\n"
                                     "- warning\n"
@@ -568,9 +639,16 @@ class OpenAILogTranslator:
                                     "{\n"
                                     '  "severity": "info | warning | error | execution | risk | blocked",\n'
                                     '  "message": "mensagem curta e humana",\n'
-                                    '  "details": null,\n'
+                                    '  "details": "explicacao curta ou null",\n'
                                     '  "color": "blue | yellow | red | purple | orange | gray",\n'
-                                    '  "relevant": true\n'
+                                    '  "relevant": true,\n'
+                                    '  "humanized_details": {\n'
+                                    '    "market_state": "texto limpo sobre o mercado",\n'
+                                    '    "model_interpretation": "texto limpo sobre o ensemble",\n'
+                                    '    "filters_diagnostic": "texto limpo sobre filtros e bloqueios",\n'
+                                    '    "execution_summary": "texto limpo sobre a execucao",\n'
+                                    '    "simple_summary": "resumo curto e direto"\n'
+                                    "  }\n"
                                     "}"
                                 ),
                             }
@@ -590,12 +668,13 @@ class OpenAILogTranslator:
                     "format": {
                         "type": "json_schema",
                         "name": "launcher_event_summary",
-                        "schema": schema,
+                        "schema": AI_OUTPUT_SCHEMA,
                         "strict": True,
                     }
                 },
             )
             translated = self._parse_translation_payload(response.output_text)
+            humanized_details = translated["humanized_details"]
             candidate = HumanizedEvent(
                 source=fallback.source,
                 event_type=fallback.event_type,
@@ -613,6 +692,13 @@ class OpenAILogTranslator:
                 relevant=bool(translated.get("relevant", fallback.relevant)),
                 fingerprint=fallback.fingerprint,
                 raw_detail=fallback.raw_detail,
+                market_state=str(humanized_details.get("market_state", fallback.market_state)),
+                model_interpretation=str(
+                    humanized_details.get("model_interpretation", fallback.model_interpretation)
+                ),
+                filters_diagnostic=str(humanized_details.get("filters_diagnostic", fallback.filters_diagnostic)),
+                execution_summary=str(humanized_details.get("execution_summary", fallback.execution_summary)),
+                simple_summary=str(humanized_details.get("simple_summary", fallback.simple_summary)),
             )
             result = candidate if self._is_clean_translation(candidate, raw_log) else fallback
         except Exception:
@@ -667,6 +753,7 @@ class OpenAILogTranslator:
         message = str(payload.get("message", "")).strip()
         relevant = payload.get("relevant")
         details = payload.get("details")
+        humanized_details = payload.get("humanized_details")
 
         if severity not in {"info", "warning", "error", "execution", "risk", "blocked"}:
             raise ValueError("invalid severity")
@@ -678,6 +765,24 @@ class OpenAILogTranslator:
             raise ValueError("invalid relevant flag")
         if details is not None and not isinstance(details, str):
             raise ValueError("invalid details")
+        if not isinstance(humanized_details, dict):
+            raise ValueError("invalid humanized_details")
+
+        parsed_humanized_details: dict[str, str] = {}
+        for key in (
+            "market_state",
+            "model_interpretation",
+            "filters_diagnostic",
+            "execution_summary",
+            "simple_summary",
+        ):
+            value = humanized_details.get(key)
+            if not isinstance(value, str):
+                raise ValueError(f"invalid {key}")
+            normalized_value = value.strip()
+            if not normalized_value:
+                raise ValueError(f"empty {key}")
+            parsed_humanized_details[key] = normalized_value
 
         return {
             "severity": severity,
@@ -685,6 +790,7 @@ class OpenAILogTranslator:
             "details": details,
             "color": color,
             "relevant": bool(relevant),
+            "humanized_details": parsed_humanized_details,
         }
 
     def _normalize_cache_text(self, text: str) -> str:
