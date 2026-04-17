@@ -1280,9 +1280,19 @@ class TraderBotLauncher(QMainWindow):
         terminal_layout.setContentsMargins(18, 16, 18, 16)
         terminal_layout.setSpacing(10)
 
+        header = QHBoxLayout()
+        header.setSpacing(10)
+
         title = QLabel("Terminal")
         title.setObjectName("PanelTitle")
-        terminal_layout.addWidget(title)
+        header.addWidget(title)
+        header.addStretch(1)
+
+        self.clear_terminal_button = QPushButton("Limpar terminal")
+        self.clear_terminal_button.setObjectName("SecondaryButton")
+        self.clear_terminal_button.clicked.connect(self._clear_terminal_output)
+        header.addWidget(self.clear_terminal_button)
+        terminal_layout.addLayout(header)
 
         hint = QLabel("Espelho bruto do stdout e stderr do runtime e dos comandos auxiliares.")
         hint.setObjectName("HeroHint")
@@ -1981,6 +1991,10 @@ class TraderBotLauncher(QMainWindow):
         self.pending_emergency_close = False
         args = self._build_base_args(self._current_mode()) + ["close-hyperliquid-position"]
         self._start_process(self.task_process, args, label="Kill switch", silent=False)
+
+    def _clear_terminal_output(self) -> None:
+        if hasattr(self, "terminal_output"):
+            self.terminal_output.clear()
 
     def _append_terminal_output(self, text: str) -> None:
         if not text or not hasattr(self, "terminal_output"):
