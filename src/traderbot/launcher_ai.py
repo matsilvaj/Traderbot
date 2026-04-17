@@ -196,7 +196,12 @@ class OpenAILogTranslator:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.cfg.launcher.openai_enabled and self.api_key and OpenAI is not None)
+        return bool(self.api_key and OpenAI is not None)
+
+    @property
+    def model_name(self) -> str:
+        model_name = str(self.cfg.launcher.openai_model or AI_MODEL_NAME).strip()
+        return model_name or AI_MODEL_NAME
 
     @property
     def api_key(self) -> str | None:
@@ -252,7 +257,7 @@ class OpenAILogTranslator:
             client = OpenAI(api_key=self.api_key, timeout=float(self.cfg.launcher.openai_timeout_seconds))
             prompt_payload = self._prompt_builder.build_user_payload(event, fallback)
             response = client.responses.create(
-                model=AI_MODEL_NAME,
+                model=self.model_name,
                 input=[
                     {
                         "role": "system",
@@ -326,10 +331,10 @@ class OpenAILogTranslator:
 
     def status_snapshot(self) -> dict[str, Any]:
         return {
-            "enabled": bool(self.cfg.launcher.openai_enabled),
+            "enabled": True,
             "api_key_present": bool(self.api_key),
             "client_ready": bool(self.enabled),
-            "model": AI_MODEL_NAME,
+            "model": self.model_name,
             "api_key_env": self.cfg.launcher.openai_api_key_env,
         }
 

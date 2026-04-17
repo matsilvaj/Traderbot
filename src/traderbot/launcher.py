@@ -18,7 +18,6 @@ from PySide6.QtCore import QObject, QProcess, QRunnable, Qt, QThreadPool, QTimer
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QDialog,
     QDoubleSpinBox,
     QFrame,
@@ -86,6 +85,17 @@ def _display_value(value: Any, fallback: str) -> str:
     if not text or text == "--":
         return fallback
     return text
+
+
+def _has_env_value(name: str) -> bool:
+    if not name:
+        return False
+    value = os.getenv(name)
+    if value is None:
+        value = os.getenv(f"\ufeff{name}")
+    if value is None:
+        return False
+    return bool(value.strip().strip("\"'"))
 
 
 def _safe_float(value: Any) -> float | None:
@@ -581,9 +591,12 @@ class SettingsDialog(QDialog):
         self.risk_input.setValue(float(self.cfg.environment.max_risk_per_trade) * 100.0)
         self.risk_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.openai_checkbox = QCheckBox("Usar OpenAI para resumir eventos")
-        self.openai_checkbox.setChecked(bool(self.cfg.launcher.openai_enabled))
-        self.openai_checkbox.stateChanged.connect(self._refresh_openai_state)
+        self.hold_threshold_input = QDoubleSpinBox()
+        self.hold_threshold_input.setRange(0.0, 1.0)
+        self.hold_threshold_input.setDecimals(2)
+        self.hold_threshold_input.setSingleStep(0.01)
+        self.hold_threshold_input.setValue(float(self.cfg.environment.action_hold_threshold))
+        self.hold_threshold_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.openai_status_label = QLabel("")
         self.openai_status_label.setObjectName("badge")
@@ -619,13 +632,15 @@ class SettingsDialog(QDialog):
 
         form.addWidget(self._field_label("Risco maximo por trade"), 0, 0)
         form.addWidget(self.risk_input, 0, 1)
-        form.addWidget(self._field_label("Auto check"), 1, 0)
-        form.addWidget(self.autocheck_input, 1, 1)
+        form.addWidget(self._field_label("Filtro HOLD"), 1, 0)
+        form.addWidget(self.hold_threshold_input, 1, 1)
+        form.addWidget(self._field_label("Auto check"), 2, 0)
+        form.addWidget(self.autocheck_input, 2, 1)
 
         root.addLayout(form)
         openai_row = QHBoxLayout()
         openai_row.setSpacing(12)
-        openai_row.addWidget(self.openai_checkbox, 1)
+        openai_row.addWidget(self._field_label("Resumo inteligente via OpenAI"), 1)
         openai_row.addWidget(self.openai_status_label, 0, Qt.AlignRight)
         root.addLayout(openai_row)
         root.addWidget(self.api_key_hint)
@@ -681,19 +696,18 @@ class SettingsDialog(QDialog):
 
     def _refresh_openai_state(self) -> None:
         key_name = self.cfg.launcher.openai_api_key_env or "OPENAI_API_KEY"
-        has_key = bool(os.getenv(key_name))
-        if self.openai_checkbox.isChecked() and has_key:
+        has_key = _has_env_value(key_name)
+        if has_key:
             self.openai_status_label.setText("Ativo")
             _set_widget_property(self.openai_status_label, "severity", "execution")
-            self.api_key_hint.setText(f"Resumo inteligente ativo. Chave detectada via {key_name}.")
-        elif self.openai_checkbox.isChecked():
+            self.api_key_hint.setText(f"OpenAI fica sempre ativa no launcher. Chave detectada via {key_name}.")
+        else:
             self.openai_status_label.setText("Sem chave")
             _set_widget_property(self.openai_status_label, "severity", "warning")
-            self.api_key_hint.setText(f"Resumo inteligente solicitado, mas nenhuma chave foi detectada em {key_name}.")
-        else:
-            self.openai_status_label.setText("Desativado")
-            _set_widget_property(self.openai_status_label, "severity", "blocked")
-            self.api_key_hint.setText("Resumo inteligente desativado. O launcher usara apenas o fallback local.")
+            self.api_key_hint.setText(
+                f"OpenAI fica sempre ativa no launcher, mas nenhuma chave foi detectada em {key_name}. "
+                "Sem isso, o resumo local continua como fallback."
+            )
         _fit_label_height(self.api_key_hint)
 
     def smoke_side(self) -> str:
@@ -705,14 +719,11 @@ class SettingsDialog(QDialog):
     def risk_pct(self) -> float:
         return float(self.risk_input.value()) / 100.0
 
+    def hold_threshold(self) -> float:
+        return float(self.hold_threshold_input.value())
+
     def auto_check_interval(self) -> int:
         return int(self.autocheck_input.value())
-
-    def openai_enabled(self) -> bool:
-        return bool(self.openai_checkbox.isChecked())
-
-    def openai_model(self) -> str:
-        return "gpt-4o-mini"
 
 
 
@@ -1848,8 +1859,7 @@ class TraderBotLauncher(QMainWindow):
         self.smoke_wait_seconds = dialog.smoke_wait_seconds()
         self._save_settings(
             max_risk_per_trade=dialog.risk_pct(),
-            openai_enabled=dialog.openai_enabled(),
-            openai_model=dialog.openai_model(),
+            action_hold_threshold=dialog.hold_threshold(),
             auto_check_interval=dialog.auto_check_interval(),
         )
 
@@ -1857,8 +1867,7 @@ class TraderBotLauncher(QMainWindow):
         self,
         *,
         max_risk_per_trade: float,
-        openai_enabled: bool,
-        openai_model: str,
+        action_hold_threshold: float,
         auto_check_interval: int,
     ) -> None:
         path = Path(self.config_path)
@@ -1867,10 +1876,10 @@ class TraderBotLauncher(QMainWindow):
 
         raw.setdefault("environment", {})
         raw["environment"]["max_risk_per_trade"] = float(max_risk_per_trade)
+        raw["environment"]["action_hold_threshold"] = float(action_hold_threshold)
 
         raw.setdefault("launcher", {})
-        raw["launcher"]["openai_enabled"] = bool(openai_enabled)
-        raw["launcher"]["openai_model"] = str(openai_model)
+        raw["launcher"].pop("openai_enabled", None)
         raw["launcher"]["auto_check_interval_seconds"] = int(auto_check_interval)
 
         with path.open("w", encoding="utf-8") as handle:
@@ -1881,17 +1890,22 @@ class TraderBotLauncher(QMainWindow):
         self.health_timer.setInterval(int(self.cfg.launcher.auto_check_interval_seconds) * 1000)
         self._hydrate_static_snapshot()
         self.state.risk_label = _pct(self.cfg.environment.max_risk_per_trade)
+        if self.state.decision_snapshot:
+            final_action = float(self.state.decision_snapshot.get("final_action", 0.0) or 0.0)
+            self.state.signal_label = self._signal_label(final_action)
         self._refresh_dashboard()
+        key_name = self.cfg.launcher.openai_api_key_env or "OPENAI_API_KEY"
+        has_key = _has_env_value(key_name)
         self._push_event(
             self._new_event(
                 source="launcher",
                 event_type="generic",
                 raw_line="Configuracoes salvas.",
                 message=(
-                    "Configuracoes salvas. "
-                    f"Resumo OpenAI "
-                    f"{'ativo' if self.cfg.launcher.openai_enabled and os.getenv(self.cfg.launcher.openai_api_key_env or 'OPENAI_API_KEY') else 'desativado ou sem chave'} "
-                    "para os proximos checks e execucoes."
+                    f"Configuracoes salvas. Risco {self.cfg.environment.max_risk_per_trade * 100.0:.2f}%, "
+                    f"filtro HOLD {self.cfg.environment.action_hold_threshold:.2f}, "
+                    f"auto check {int(self.cfg.launcher.auto_check_interval_seconds)}s e OpenAI "
+                    f"{'pronta' if has_key else 'sem chave'}."
                 ),
                 event_code="system.settings_saved",
             )
