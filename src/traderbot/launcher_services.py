@@ -137,13 +137,14 @@ class LocalLogInterpreter:
         )
 
     def _cycle_event(self, event: LauncherEvent, payload: dict[str, Any]) -> HumanizedEvent:
+        cycle_key = self._cycle_fingerprint_suffix(payload)
         if payload.get("error"):
             return self._build(
                 event,
                 severity="error",
                 message="Erro operacional no ciclo do bot",
                 details=str(payload.get("error")),
-                fingerprint=f"cycle:error:{str(payload.get('error')).lower()}",
+                fingerprint=f"cycle:error:{str(payload.get('error')).lower()}:{cycle_key}",
                 event_code="execution.cycle_error",
             )
 
@@ -156,7 +157,7 @@ class LocalLogInterpreter:
                 severity="execution",
                 message=f"Nova posicao {direction} aberta em ${notional:,.2f}",
                 details=f"Risco efetivo usado no disparo: ${risk_amount:,.2f}.",
-                fingerprint=f"cycle:open:{direction}",
+                fingerprint=f"cycle:open:{direction}:{cycle_key}",
                 event_code="execution.trade_open",
             )
 
@@ -167,7 +168,7 @@ class LocalLogInterpreter:
                 severity="execution",
                 message=f"Posicao encerrada por {exit_reason}",
                 details="A posicao foi fechada e o bot voltou a aguardar a proxima oportunidade.",
-                fingerprint=f"cycle:close:{str(payload.get('exit_reason', 'unknown')).lower()}",
+                fingerprint=f"cycle:close:{str(payload.get('exit_reason', 'unknown')).lower()}:{cycle_key}",
                 event_code="execution.trade_close",
             )
 
@@ -178,7 +179,7 @@ class LocalLogInterpreter:
                 severity="blocked",
                 message=reason,
                 details=None,
-                fingerprint=f"cycle:block:{str(payload.get('blocked_reason')).lower()}",
+                fingerprint=f"cycle:block:{str(payload.get('blocked_reason')).lower()}:{cycle_key}",
                 event_code=f"blocked.{str(payload.get('blocked_reason')).lower()}",
             )
 
@@ -189,27 +190,25 @@ class LocalLogInterpreter:
                 severity="execution",
                 message=f"Posicao mantida; ensemble segue em {vote_bucket}",
                 details=None,
-                fingerprint=f"cycle:hold-open:{vote_bucket}",
+                fingerprint=f"cycle:hold-open:{vote_bucket}:{cycle_key}",
                 event_code="execution.position_held",
-                relevant=False,
             )
 
         vote_bucket = str(payload.get("vote_bucket", "hold")).upper()
         regime_valid = bool(payload.get("regime_valid"))
-        short_message = "Bot aguardando proximo contexto util"
+        short_message = "Sem entrada nesta barra"
         details = (
-            "Sem entrada nesta barra."
+            f"Ensemble em {vote_bucket} e regime valido, sem gatilho de entrada nesta vela."
             if regime_valid
-            else "Sem entrada nesta barra porque o regime atual segue invalido."
+            else f"Ensemble em {vote_bucket} e regime invalido nesta vela."
         )
         return self._build(
             event,
             severity="info",
             message=short_message,
-            details=f"{details} Ensemble em {vote_bucket}.",
-            fingerprint=f"cycle:flat:{vote_bucket}:{regime_valid}",
+            details=details,
+            fingerprint=f"cycle:flat:{vote_bucket}:{regime_valid}:{cycle_key}",
             event_code="system.waiting",
-            relevant=False,
         )
 
     def _smoke_event(self, event: LauncherEvent, payload: dict[str, Any]) -> HumanizedEvent:
@@ -440,6 +439,11 @@ class LocalLogInterpreter:
         normalized = self._number_re.sub("#", message.lower())
         normalized = re.sub(r"\s+", " ", normalized).strip()
         return sha1(normalized.encode("utf-8")).hexdigest()[:16]
+
+    def _cycle_fingerprint_suffix(self, payload: dict[str, Any]) -> str:
+        bar_timestamp = str(payload.get("bar_timestamp") or "").strip()
+        timestamp = str(payload.get("timestamp") or "").strip()
+        return bar_timestamp or timestamp or "unknown_cycle"
 
 
 class OpenAILogTranslator:

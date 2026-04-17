@@ -7,6 +7,7 @@ import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
@@ -784,6 +785,24 @@ def build_live_observation(
         "regime_valid_for_entry": bool(regime_valid),
         "regime_dist_ema_240": regime_dist_ema_240,
         "regime_vol_regime_z": regime_vol_regime_z,
+        "candle_open": float(latest_raw.get("open", current_price)),
+        "candle_high": float(latest_raw.get("high", current_price)),
+        "candle_low": float(latest_raw.get("low", current_price)),
+        "candle_close": current_price,
+        "candle_volume": float(latest_raw.get("volume", 0.0)),
+        "rsi_14": float(latest_raw.get("rsi_14", 0.0)),
+        "dist_ema_240": float(latest_raw.get("dist_ema_240", 0.0)),
+        "dist_ema_960": float(latest_raw.get("dist_ema_960", 0.0)),
+        "atr_pct": float(latest_raw.get("atr_pct", 0.0)),
+        "volatility_24": float(latest_raw.get("volatility_24", 0.0)),
+        "vol_regime_z": float(latest_raw.get("vol_regime_z", 0.0)),
+        "range_pct": float(latest_raw.get("range_pct", 0.0)),
+        "range_compression_10": float(latest_raw.get("range_compression_10", 0.0)),
+        "range_expansion_3": float(latest_raw.get("range_expansion_3", 0.0)),
+        "breakout_up_10": float(latest_raw.get("breakout_up_10", 0.0)),
+        "breakout_down_10": float(latest_raw.get("breakout_down_10", 0.0)),
+        "volume_zscore_20": float(latest_raw.get("volume_zscore_20", 0.0)),
+        "volume_ratio_20": float(latest_raw.get("volume_ratio_20", 0.0)),
     }
     return np.concatenate([obs, extras]).astype(np.float32, copy=False), live_context
 
@@ -803,6 +822,286 @@ def action_bucket(raw_action: float, hold_threshold: float) -> int:
 
 def action_bucket_label(bucket: int) -> str:
     return {1: "buy", -1: "sell", 0: "hold"}[bucket]
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, ""):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _human_runtime_block_reason(reason: Any) -> str:
+    reason_text = str(reason or "").strip().lower()
+    mapping = {
+        "regime_filter": "entrada bloqueada pelo filtro de regime",
+        "cooldown": "entrada bloqueada pelo cooldown",
+        "order_cooldown": "entrada bloqueada por cooldown de ordem",
+        "duplicate_cycle": "entrada bloqueada para evitar ordem duplicada na mesma vela",
+        "open_position_locked": "sinal ignorado porque existe posicao travada por TP/SL ou posicao em manutencao",
+        "prevented_same_candle_reversal": "reversao impedida na mesma vela",
+        "min_notional_risk": "entrada pulada porque o notional minimo violaria o risco maximo",
+        "min_notional": "entrada bloqueada por notional minimo da exchange",
+        "volume_min": "entrada bloqueada por volume minimo da exchange",
+    }
+    return mapping.get(reason_text, reason_text or "sem bloqueio")
+
+
+def _runtime_execution_action(result: dict[str, Any], position_side: int) -> str:
+    if result.get("error"):
+        return "error"
+    if result.get("opened_position"):
+        return "opened_position"
+    if result.get("closed_position"):
+        return "closed_position"
+    if result.get("blocked_reason"):
+        return "blocked_entry"
+    if position_side != 0:
+        return "position_held"
+    return "no_entry"
+
+
+def _runtime_event_code(result: dict[str, Any], position_side: int) -> str:
+    if result.get("error"):
+        return "runtime.cycle_error"
+    if result.get("opened_position"):
+        return "execution.trade_open"
+    if result.get("closed_position"):
+        return "execution.trade_close"
+    blocked_reason = str(result.get("blocked_reason") or "").strip().lower()
+    if blocked_reason:
+        return f"blocked.{blocked_reason}"
+    if position_side != 0:
+        return "execution.position_held"
+    return "runtime.no_entry"
+
+
+def _build_decision_reason(vote_info: dict[str, Any], final_action: float, hold_threshold: float) -> str:
+    bucket = str(vote_info.get("bucket", "hold")).upper()
+    if vote_info.get("mode") == "ensemble":
+        votes = vote_info.get("votes") or {}
+        return (
+            f"Ensemble decidiu {bucket} com votos "
+            f"buy={int(votes.get('buy', 0))}, hold={int(votes.get('hold', 0))}, sell={int(votes.get('sell', 0))}; "
+            f"acao final={final_action:.4f}; threshold_hold={hold_threshold:.2f}"
+        )
+    raw_action = _as_float(vote_info.get("raw_action", final_action))
+    return (
+        f"PPO individual decidiu {bucket} com acao bruta={raw_action:.4f}; "
+        f"acao final={final_action:.4f}; threshold_hold={hold_threshold:.2f}"
+    )
+
+
+def _build_runtime_cycle_log(
+    cfg: AppConfig,
+    live_context: dict[str, Any],
+    vote_info: dict[str, Any],
+    action: float,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    position_snapshot = result.get("position_snapshot") or {}
+    position_side = int(position_snapshot.get("side", 0) or 0)
+    blocked_reason = result.get("blocked_reason")
+    execution_action = _runtime_execution_action(result, position_side)
+    event_code = _runtime_event_code(result, position_side)
+    hold_threshold = float(cfg.environment.action_hold_threshold)
+    final_action = float(action)
+    decision_reason = _build_decision_reason(vote_info, final_action, hold_threshold)
+    regime_valid = bool(live_context["regime_valid_for_entry"])
+    trade_direction = str(result.get("trade_direction", "") or "").upper()
+
+    feature_snapshot = {
+        "rsi_14": _as_float(live_context.get("rsi_14")),
+        "dist_ema_240": _as_float(live_context.get("dist_ema_240")),
+        "dist_ema_960": _as_float(live_context.get("dist_ema_960")),
+        "atr_pct": _as_float(live_context.get("atr_pct")),
+        "volatility_24": _as_float(live_context.get("volatility_24")),
+        "vol_regime_z": _as_float(live_context.get("vol_regime_z")),
+        "range_pct": _as_float(live_context.get("range_pct")),
+        "range_compression_10": _as_float(live_context.get("range_compression_10")),
+        "range_expansion_3": _as_float(live_context.get("range_expansion_3")),
+        "breakout_up_10": _as_float(live_context.get("breakout_up_10")),
+        "breakout_down_10": _as_float(live_context.get("breakout_down_10")),
+        "volume_zscore_20": _as_float(live_context.get("volume_zscore_20")),
+        "volume_ratio_20": _as_float(live_context.get("volume_ratio_20")),
+    }
+
+    market_snapshot = {
+        "bar_timestamp": str(live_context["bar_timestamp"]),
+        "open": _as_float(live_context.get("candle_open")),
+        "high": _as_float(live_context.get("candle_high")),
+        "low": _as_float(live_context.get("candle_low")),
+        "close": _as_float(live_context.get("candle_close")),
+        "volume": _as_float(live_context.get("candle_volume")),
+        "reference_price": _as_float(live_context.get("reference_price")),
+    }
+
+    decision = {
+        "decision_mode": str(cfg.execution.decision_mode),
+        "trade_direction": trade_direction,
+        "action_hold_threshold": hold_threshold,
+        "final_action": final_action,
+        "signal_bucket": action_bucket_label(action_bucket(final_action, hold_threshold)),
+        "vote_bucket": vote_info.get("bucket"),
+        "votes": vote_info.get("votes"),
+        "raw_actions": vote_info.get("raw_actions"),
+        "raw_action": vote_info.get("raw_action"),
+        "tie_hold": bool(vote_info.get("tie_hold", False)),
+        "confidence_pct": abs(final_action) * 100.0,
+        "reason": decision_reason,
+    }
+
+    filters = {
+        "regime_valid_for_entry": regime_valid,
+        "regime_dist_ema_240": _as_float(live_context.get("regime_dist_ema_240")),
+        "regime_vol_regime_z": _as_float(live_context.get("regime_vol_regime_z")),
+        "regime_thresholds": {
+            "min_abs_dist_ema_240": float(cfg.environment.regime_min_abs_dist_ema_240),
+            "min_vol_regime_z": float(cfg.environment.regime_min_vol_regime_z),
+        },
+        "blocked_reason": blocked_reason,
+        "blocked_reason_human": _human_runtime_block_reason(blocked_reason) if blocked_reason else None,
+        "blocked_by_min_notional": bool(result.get("blocked_by_min_notional", False)),
+        "bumped_to_min_notional": bool(result.get("bumped_to_min_notional", False)),
+        "skipped_due_to_min_notional_risk": bool(result.get("skipped_due_to_min_notional_risk", False)),
+        "ignored_signal": bool(result.get("ignored_signal", False)),
+        "attempted_reversal": bool(result.get("attempted_reversal", False)),
+        "prevented_same_candle_reversal": bool(result.get("prevented_same_candle_reversal", False)),
+        "force_exit_only_by_tp_sl": bool(result.get("force_exit_only_by_tp_sl", False)),
+    }
+
+    execution = {
+        "action_taken": execution_action,
+        "opened_trade": bool(result.get("opened_position", False)),
+        "closed_trade": bool(result.get("closed_position", False)),
+        "position_side": position_side,
+        "position_label": "LONG" if position_side > 0 else ("SHORT" if position_side < 0 else "FLAT"),
+        "position_is_open": position_side != 0,
+        "position_size": _as_float(result.get("position_size", result.get("volume", 0.0))),
+        "position_avg_entry_price": _as_float(position_snapshot.get("avg_entry_price")),
+        "position_unrealized_pnl": _as_float(position_snapshot.get("unrealized_pnl")),
+        "position_time_in_bars": _as_float(position_snapshot.get("time_in_position")),
+        "entry_distance_from_ema_240": _as_float(position_snapshot.get("entry_distance_from_ema_240")),
+        "stop_loss_price": _as_float(result.get("stop_loss_price")),
+        "take_profit_price": _as_float(result.get("take_profit_price")),
+        "exit_reason": result.get("exit_reason") or (result.get("stop_take_event", {}) or {}).get("trigger"),
+        "error": result.get("error"),
+        "response_ok": bool(result.get("ok", False)),
+    }
+
+    sizing = {
+        "available_to_trade": result.get("available_to_trade"),
+        "available_to_trade_source_field": result.get("available_to_trade_source_field"),
+        "sizing_balance_used": result.get("sizing_balance_used"),
+        "sizing_balance_source": result.get("sizing_balance_source"),
+        "risk_pct": result.get("risk_pct"),
+        "risk_amount": result.get("risk_amount"),
+        "stop_loss_pct": result.get("stop_loss_pct"),
+        "stop_distance_price": result.get("stop_distance_price"),
+        "target_notional": result.get("target_notional"),
+        "raw_volume": result.get("raw_volume"),
+        "adjusted_volume": result.get("adjusted_volume"),
+        "adjusted_notional": result.get("adjusted_notional"),
+        "notional_value": result.get("notional_value"),
+        "min_notional_usd": result.get("min_notional_usd"),
+        "effective_risk_amount": result.get("effective_risk_amount"),
+        "exceeds_target_risk": result.get("exceeds_target_risk"),
+        "leverage_configured": result.get("leverage_configured"),
+        "leverage_applied": result.get("leverage_applied"),
+        "leverage_used": result.get("leverage_used"),
+        "margin_estimated_consumed": result.get("margin_estimated_consumed"),
+        "has_explicit_leverage_logic": result.get("has_explicit_leverage_logic"),
+    }
+
+    system_state = {
+        "network": result.get("network", cfg.hyperliquid.network),
+        "symbol": cfg.hyperliquid.symbol,
+        "timeframe": cfg.hyperliquid.timeframe,
+        "execution_mode": result.get("execution_mode", cfg.execution.execution_mode),
+        "operational_mode": result.get("mode"),
+        "decision_mode": str(cfg.execution.decision_mode),
+        "order_slippage": float(getattr(cfg.execution, "order_slippage", 0.0)),
+        "model_slippage_pct": float(cfg.environment.slippage_pct),
+    }
+
+    return {
+        "event": "runtime_cycle",
+        "event_code": event_code,
+        "module": "runtime",
+        "stage": "decision_cycle",
+        "timestamp": str(result.get("timestamp", "")),
+        "bar_timestamp": str(live_context["bar_timestamp"]),
+        "symbol": cfg.hyperliquid.symbol,
+        "timeframe": cfg.hyperliquid.timeframe,
+        "network": result.get("network", cfg.hyperliquid.network),
+        "decision_reason": decision_reason,
+        "market_snapshot": market_snapshot,
+        "feature_snapshot": feature_snapshot,
+        "decision": decision,
+        "filters": filters,
+        "execution": execution,
+        "sizing": sizing,
+        "system_state": system_state,
+        # flat compatibility keys for launcher/runtime consumers
+        "decision_mode": decision["decision_mode"],
+        "regime_valid": filters["regime_valid_for_entry"],
+        "regime_dist_ema_240": filters["regime_dist_ema_240"],
+        "regime_vol_regime_z": filters["regime_vol_regime_z"],
+        "votes": decision["votes"],
+        "vote_bucket": decision["vote_bucket"],
+        "tie_hold": decision["tie_hold"],
+        "final_action": decision["final_action"],
+        "reference_price": market_snapshot["reference_price"],
+        "position_side": execution["position_side"],
+        "position_label": execution["position_label"],
+        "position_is_open": execution["position_is_open"],
+        "opened_trade": execution["opened_trade"],
+        "closed_trade": execution["closed_trade"],
+        "position_size": execution["position_size"],
+        "position_avg_entry_price": execution["position_avg_entry_price"],
+        "position_unrealized_pnl": execution["position_unrealized_pnl"],
+        "position_time_in_bars": execution["position_time_in_bars"],
+        "entry_distance_from_ema_240": execution["entry_distance_from_ema_240"],
+        "available_to_trade": sizing["available_to_trade"],
+        "available_to_trade_source_field": sizing["available_to_trade_source_field"],
+        "sizing_balance_used": sizing["sizing_balance_used"],
+        "sizing_balance_source": sizing["sizing_balance_source"],
+        "order_slippage": system_state["order_slippage"],
+        "model_slippage_pct": system_state["model_slippage_pct"],
+        "risk_pct": sizing["risk_pct"],
+        "risk_amount": sizing["risk_amount"],
+        "stop_loss_pct": sizing["stop_loss_pct"],
+        "stop_distance_price": sizing["stop_distance_price"],
+        "target_notional": sizing["target_notional"],
+        "raw_volume": sizing["raw_volume"],
+        "adjusted_volume": sizing["adjusted_volume"],
+        "adjusted_notional": sizing["adjusted_notional"],
+        "notional_value": sizing["notional_value"],
+        "min_notional_usd": sizing["min_notional_usd"],
+        "blocked_by_min_notional": filters["blocked_by_min_notional"],
+        "bumped_to_min_notional": filters["bumped_to_min_notional"],
+        "effective_risk_amount": sizing["effective_risk_amount"],
+        "exceeds_target_risk": sizing["exceeds_target_risk"],
+        "skipped_due_to_min_notional_risk": filters["skipped_due_to_min_notional_risk"],
+        "leverage_configured": sizing["leverage_configured"],
+        "leverage_applied": sizing["leverage_applied"],
+        "leverage_used": sizing["leverage_used"],
+        "margin_estimated_consumed": sizing["margin_estimated_consumed"],
+        "has_explicit_leverage_logic": sizing["has_explicit_leverage_logic"],
+        "blocked_reason": filters["blocked_reason"],
+        "blocked_reason_human": filters["blocked_reason_human"],
+        "error": execution["error"],
+        "stop_loss_price": execution["stop_loss_price"],
+        "take_profit_price": execution["take_profit_price"],
+        "exit_reason": execution["exit_reason"],
+        "force_exit_only_by_tp_sl": filters["force_exit_only_by_tp_sl"],
+        "ignored_signal": filters["ignored_signal"],
+        "attempted_reversal": filters["attempted_reversal"],
+        "prevented_same_candle_reversal": filters["prevented_same_candle_reversal"],
+        "execution_action": execution_action,
+    }
 
 
 def load_execution_models(cfg: AppConfig, logger):
@@ -979,73 +1278,7 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
                         bar_timestamp=str(live_context["bar_timestamp"]),
                     )
                 )
-                position_snapshot = result.get("position_snapshot") or {}
-                position_side = int(position_snapshot.get("side", 0) or 0)
-                cycle_log = {
-                    "timestamp": str(result.get("timestamp", "")),
-                    "bar_timestamp": str(live_context["bar_timestamp"]),
-                    "decision_mode": str(cfg.execution.decision_mode),
-                    "regime_valid": bool(live_context["regime_valid_for_entry"]),
-                    "regime_dist_ema_240": float(live_context["regime_dist_ema_240"]),
-                    "regime_vol_regime_z": float(live_context["regime_vol_regime_z"]),
-                    "votes": vote_info.get("votes"),
-                    "vote_bucket": vote_info.get("bucket"),
-                    "tie_hold": vote_info.get("tie_hold"),
-                    "final_action": float(action),
-                    "reference_price": float(live_context["reference_price"]),
-                    "position_side": position_side,
-                    "position_label": "LONG" if position_side > 0 else ("SHORT" if position_side < 0 else "FLAT"),
-                    "position_is_open": position_side != 0,
-                    "opened_trade": bool(result.get("opened_position", False)),
-                    "closed_trade": bool(result.get("closed_position", False)),
-                    "position_size": float(result.get("position_size", result.get("volume", 0.0) or 0.0)),
-                    "position_avg_entry_price": float(position_snapshot.get("avg_entry_price", 0.0) or 0.0),
-                    "position_unrealized_pnl": float(position_snapshot.get("unrealized_pnl", 0.0) or 0.0),
-                    "position_time_in_bars": float(position_snapshot.get("time_in_position", 0.0) or 0.0),
-                    "entry_distance_from_ema_240": float(
-                        position_snapshot.get("entry_distance_from_ema_240", 0.0) or 0.0
-                    ),
-                    "available_to_trade": result.get("available_to_trade"),
-                    "available_to_trade_source_field": result.get("available_to_trade_source_field"),
-                    "sizing_balance_used": result.get("sizing_balance_used"),
-                    "sizing_balance_source": result.get("sizing_balance_source"),
-                    "network": result.get("network"),
-                    "order_slippage": float(getattr(cfg.execution, "order_slippage", 0.0)),
-                    "model_slippage_pct": float(cfg.environment.slippage_pct),
-                    "risk_pct": result.get("risk_pct"),
-                    "risk_amount": result.get("risk_amount"),
-                    "stop_loss_pct": result.get("stop_loss_pct"),
-                    "stop_distance_price": result.get("stop_distance_price"),
-                    "target_notional": result.get("target_notional"),
-                    "raw_volume": result.get("raw_volume"),
-                    "adjusted_volume": result.get("adjusted_volume"),
-                    "adjusted_notional": result.get("adjusted_notional"),
-                    "notional_value": result.get("notional_value"),
-                    "min_notional_usd": result.get("min_notional_usd"),
-                    "blocked_by_min_notional": result.get("blocked_by_min_notional"),
-                    "bumped_to_min_notional": result.get("bumped_to_min_notional"),
-                    "effective_risk_amount": result.get("effective_risk_amount"),
-                    "exceeds_target_risk": result.get("exceeds_target_risk"),
-                    "skipped_due_to_min_notional_risk": result.get("skipped_due_to_min_notional_risk"),
-                    "leverage_configured": result.get("leverage_configured"),
-                    "leverage_applied": result.get("leverage_applied"),
-                    "leverage_used": result.get("leverage_used"),
-                    "margin_estimated_consumed": result.get("margin_estimated_consumed"),
-                    "has_explicit_leverage_logic": result.get("has_explicit_leverage_logic"),
-                    "blocked_reason": result.get("blocked_reason"),
-                    "error": result.get("error"),
-                    "stop_loss_price": result.get("stop_loss_price"),
-                    "take_profit_price": result.get("take_profit_price"),
-                    "exit_reason": result.get("exit_reason") or (
-                        result.get("stop_take_event", {}) or {}
-                    ).get("trigger"),
-                    "force_exit_only_by_tp_sl": bool(result.get("force_exit_only_by_tp_sl", False)),
-                    "ignored_signal": bool(result.get("ignored_signal", False)),
-                    "attempted_reversal": bool(result.get("attempted_reversal", False)),
-                    "prevented_same_candle_reversal": bool(
-                        result.get("prevented_same_candle_reversal", False)
-                    ),
-                }
+                cycle_log = _build_runtime_cycle_log(cfg, live_context, vote_info, action, result)
                 logger.info("Ciclo runtime HL | %s", json.dumps(cycle_log, ensure_ascii=False))
             except Exception:
                 pause_seconds = max(1.0, float(cfg.execution.pause_on_error_seconds))
@@ -1096,6 +1329,7 @@ def check_hyperliquid_pipeline(cfg: AppConfig, logger):
     executor.connect()
     try:
         status = executor.check_connection()
+        status.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
         spec = executor.get_symbol_trading_spec()
         risk_state = executor.get_account_risk_state()
         sizing_context = executor.get_sizing_balance_context(cfg.execution.execution_mode)
@@ -1121,6 +1355,34 @@ def check_hyperliquid_pipeline(cfg: AppConfig, logger):
         status["sizing_balance_source"] = sizing_context.get("sizing_balance_source")
         status["validation_sizing"] = validation_sizing
         status["account_risk_state"] = risk_state
+        status["event"] = "healthcheck"
+        status["event_code"] = "healthcheck.completed"
+        status["module"] = "connectivity"
+        status["stage"] = "post_check"
+        status["symbol"] = cfg.hyperliquid.symbol
+        status["timeframe"] = cfg.hyperliquid.timeframe
+        status["health_summary"] = {
+            "connected": bool(status.get("connected")),
+            "can_trade": bool(status.get("can_trade")),
+            "wallet_loaded": bool(status.get("wallet_loaded")),
+            "symbol_found": bool(status.get("symbol_found")),
+            "history_bars": int(status.get("history_bars", 0) or 0),
+            "healthy": bool(status.get("connected")) and bool(status.get("can_trade")),
+        }
+        status["account_summary"] = {
+            "available_to_trade": float(sizing_context.get("available_to_trade", 0.0) or 0.0),
+            "sizing_balance_used": sizing_balance,
+            "sizing_balance_source": sizing_context.get("sizing_balance_source"),
+            "equity": float(risk_state.get("equity", 0.0) or 0.0),
+            "drawdown_pct": float(risk_state.get("drawdown_pct", 0.0) or 0.0),
+            "defensive": bool(risk_state.get("defensive", False)),
+        }
+        status["risk_limits"] = {
+            "max_risk_per_trade": float(cfg.environment.max_risk_per_trade),
+            "stop_loss_pct": float(cfg.environment.stop_loss_pct),
+            "take_profit_pct": float(cfg.environment.take_profit_pct),
+            "action_hold_threshold": float(cfg.environment.action_hold_threshold),
+        }
     finally:
         executor.disconnect()
     logger.info("Status Hyperliquid: %s", json.dumps(status, ensure_ascii=False))
@@ -1177,6 +1439,26 @@ def smoke_hyperliquid_pipeline(
     finally:
         executor.disconnect()
 
+    payload.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+    payload["event"] = "smoke_test"
+    payload["event_code"] = "system.smoke_test"
+    payload["module"] = "execution"
+    payload["stage"] = "smoke_test_complete"
+    payload["symbol"] = smoke_cfg.hyperliquid.symbol
+    payload["timeframe"] = smoke_cfg.hyperliquid.timeframe
+    payload["decision_summary"] = {
+        "side_requested": str(side).lower().strip(),
+        "opened_position": bool(payload.get("opened_position")),
+        "closed_position": bool(payload.get("closed_position")),
+        "ok": bool(payload.get("ok")),
+    }
+    payload["risk_limits"] = {
+        "max_risk_per_trade": float(smoke_cfg.environment.max_risk_per_trade),
+        "stop_loss_pct": float(smoke_cfg.environment.stop_loss_pct),
+        "take_profit_pct": float(smoke_cfg.environment.take_profit_pct),
+        "order_slippage": effective_smoke_slippage,
+    }
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = Path(smoke_cfg.paths.results_dir) / f"smoke_hyperliquid_{stamp}_{network}.json"
     with output_path.open("w", encoding="utf-8") as f:
@@ -1206,6 +1488,19 @@ def close_hyperliquid_position_pipeline(cfg: AppConfig, logger):
         payload = executor.close_open_position(trigger="manual_close_from_cli")
     finally:
         executor.disconnect()
+    payload.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+    payload["event"] = "manual_close"
+    payload["event_code"] = "risk.manual_close"
+    payload["module"] = "execution"
+    payload["stage"] = "manual_close_complete"
+    payload["symbol"] = cfg.hyperliquid.symbol
+    payload["timeframe"] = cfg.hyperliquid.timeframe
+    payload["decision_summary"] = {
+        "ok": bool(payload.get("ok")),
+        "trigger": payload.get("trigger", "manual_close_from_cli"),
+        "closed_position": bool(payload.get("closed_position", False)),
+        "error": payload.get("error"),
+    }
     logger.info("Fechamento manual Hyperliquid | %s", json.dumps(payload, ensure_ascii=False))
     return payload
 

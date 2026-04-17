@@ -18,27 +18,26 @@ QLabel {
 }
 
 QFrame#card,
+QFrame#LevelBox {
+    background-color: #10161E;
+    border: 1px solid rgba(31, 41, 51, 0.38);
+    border-radius: 18px;
+}
+
 QFrame#TopBar,
 QFrame#HeroCard,
 QFrame#PositionCard,
-QFrame#NotificationPanel,
-QFrame#LevelBox {
+QFrame#NotificationPanel {
     background-color: #0F141B;
-    border: 1px solid #1F2933;
+    border: 1px solid rgba(31, 41, 51, 0.65);
     border-radius: 18px;
 }
 
 QFrame#card {
-    min-height: 136px;
+    min-height: 120px;
 }
 
-QFrame#card:hover,
-QFrame#event:hover,
-QFrame#TopBar:hover,
-QFrame#HeroCard:hover,
-QFrame#PositionCard:hover,
-QFrame#NotificationPanel:hover,
-QFrame#LevelBox:hover {
+QFrame#event:hover {
     background-color: #151B23;
 }
 
@@ -46,36 +45,6 @@ QFrame#SegmentFrame {
     background-color: #0F141B;
     border: 1px solid #1F2933;
     border-radius: 18px;
-}
-
-QTabWidget#MainTabs::pane {
-    border: none;
-    background: transparent;
-}
-
-QTabWidget#MainTabs QWidget {
-    background: transparent;
-}
-
-QTabBar::tab {
-    background-color: transparent;
-    color: #9AA4AF;
-    border: 1px solid transparent;
-    border-radius: 10px;
-    padding: 8px 14px;
-    margin: 0 6px 12px 0;
-    font-weight: 600;
-}
-
-QTabBar::tab:selected {
-    background-color: #151B23;
-    color: #E6EDF3;
-    border: 1px solid #1F2933;
-}
-
-QTabBar::tab:hover:!selected {
-    background-color: #151B23;
-    color: #E6EDF3;
 }
 
 QFrame#AdvancedFrame {
@@ -87,12 +56,16 @@ QPushButton {
     background-color: transparent;
     border: 1px solid #1F2933;
     border-radius: 8px;
-    padding: 6px 12px;
+    padding: 5px 11px;
     color: #E6EDF3;
 }
 
 QPushButton:hover {
     background-color: #151B23;
+}
+
+QPushButton:pressed {
+    background-color: #1A2230;
 }
 
 QPushButton:checked {
@@ -115,8 +88,23 @@ QPushButton#primary:hover {
     background-color: #7C3AED;
 }
 
+QPushButton#PrimaryButton:pressed,
+QPushButton#primary:pressed {
+    background-color: #6D28D9;
+}
+
 QPushButton#SecondaryButton {
     background-color: transparent;
+}
+
+QPushButton#SecondaryButton:hover {
+    background-color: #151B23;
+    border-color: #3B82F6;
+}
+
+QPushButton#SecondaryButton:pressed {
+    background-color: #182131;
+    border-color: #3B82F6;
 }
 
 QPushButton#DangerGhostButton {
@@ -135,6 +123,30 @@ QPushButton#IconButton {
     max-height: 40px;
     border-radius: 14px;
     padding: 0;
+}
+
+QPushButton#TabButton {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 8px 16px;
+    color: #9AA4AF;
+    font-weight: 600;
+}
+
+QPushButton#TabButton:hover {
+    background-color: #151B23;
+    color: #E6EDF3;
+}
+
+QPushButton#TabButton:checked {
+    background-color: #151B23;
+    border-color: #1F2933;
+    color: #E6EDF3;
+}
+
+QPushButton#TabButton[unread="true"] {
+    color: #3B82F6;
 }
 
 QLineEdit,
@@ -164,8 +176,13 @@ QCheckBox {
 
 QLabel#dialogTitle,
 QLabel#HeroTitle {
-    font-size: 24px;
+    font-size: 20px;
     font-weight: 700;
+}
+
+QWidget#centralWidget[density="compact"] QLabel#HeroTitle,
+QWidget#centralWidget[density="compact"] QLabel#dialogTitle {
+    font-size: 18px;
 }
 
 QLabel#PanelTitle {
@@ -174,8 +191,12 @@ QLabel#PanelTitle {
 }
 
 QLabel#PositionStatus {
-    font-size: 22px;
+    font-size: 19px;
     font-weight: 700;
+}
+
+QWidget#centralWidget[density="compact"] QLabel#PositionStatus {
+    font-size: 17px;
 }
 
 QLabel#metaLabel,
@@ -197,26 +218,50 @@ QLabel#metricValue,
 QLabel#LevelValue,
 QLabel#PositionNotional,
 QLabel#BalanceValue {
-    font-size: 22px;
+    font-size: 18px;
     font-weight: 700;
     font-family: "Consolas", "JetBrains Mono", "Roboto Mono", monospace;
 }
 
 QLabel#BalanceValue,
 QLabel#PnlValue {
-    font-size: 28px;
+    font-size: 24px;
     font-weight: 700;
     font-family: "Consolas", "JetBrains Mono", "Roboto Mono", monospace;
 }
 
+QWidget#centralWidget[density="compact"] QLabel#BalanceValue,
+QWidget#centralWidget[density="compact"] QLabel#PnlValue {
+    font-size: 21px;
+}
+
 QLabel#metricValue[sizeVariant="compact"] {
-    font-size: 20px;
+    font-size: 17px;
+}
+
+QWidget#centralWidget[density="compact"] QLabel#metricValue,
+QWidget#centralWidget[density="compact"] QLabel#LevelValue,
+QWidget#centralWidget[density="compact"] QLabel#PositionNotional {
+    font-size: 16px;
+}
+
+QWidget#centralWidget[density="compact"] QLabel#metricValue[sizeVariant="compact"] {
+    font-size: 15px;
 }
 
 QLabel#metricValue[sizeVariant="body"] {
-    font-size: 17px;
+    font-size: 15px;
     font-weight: 600;
     font-family: "Inter", "Segoe UI";
+}
+
+QWidget#centralWidget[density="compact"] QLabel#metricValue[sizeVariant="body"] {
+    font-size: 14px;
+}
+
+QPushButton[dashboardAction="true"] {
+    min-height: 36px;
+    padding: 4px 12px;
 }
 
 QLabel#notificationMessage {
@@ -356,10 +401,10 @@ QLabel#PnlValue[tone="error"] {
 
 QFrame#event {
     background-color: #0F141B;
-    border: 1px solid #1F2933;
+    border: 1px solid rgba(31, 41, 51, 0.45);
     border-left: 3px solid #3B82F6;
     border-radius: 8px;
-    padding: 10px;
+    padding: 12px;
 }
 
 QFrame#event[severity="info"] {
@@ -386,9 +431,25 @@ QFrame#event[severity="blocked"] {
     border-left: 3px solid #6B7280;
 }
 
-QScrollArea#NotificationScroll {
+QScrollArea#EventsScroll {
     background: transparent;
     border: none;
+}
+
+QScrollArea#DetailsScroll {
+    background: transparent;
+    border: none;
+}
+
+QWidget#EventsTab,
+QWidget#EventsViewport,
+QWidget#EventsHost {
+    background: transparent;
+}
+
+QWidget#DetailsViewport,
+QWidget#DetailsHost {
+    background: transparent;
 }
 
 QScrollBar:vertical {
@@ -399,4 +460,32 @@ QScrollBar:vertical {
 QScrollBar::handle:vertical {
     background: #1F2933;
     border-radius: 4px;
+}
+
+QFrame#EventToast {
+    background-color: #0F141B;
+    border: 1px solid rgba(31, 41, 51, 0.78);
+    border-left: 3px solid #3B82F6;
+    border-radius: 12px;
+}
+
+QFrame#EventToast[severity="error"] {
+    border-left: 3px solid #EF4444;
+}
+
+QFrame#EventToast[severity="warning"] {
+    border-left: 3px solid #EAB308;
+}
+
+QFrame#EventToast[severity="execution"] {
+    border-left: 3px solid #8B5CF6;
+}
+
+QFrame#EventToast[severity="blocked"] {
+    border-left: 3px solid #6B7280;
+}
+
+QLabel#toastTitle {
+    font-size: 14px;
+    font-weight: 600;
 }
