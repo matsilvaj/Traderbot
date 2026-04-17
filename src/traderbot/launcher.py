@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from traderbot.config import AppConfig, load_config
+from traderbot.config import AppConfig, EnvironmentConfig, load_config
 from traderbot.launcher_ai import OpenAILogTranslator
 from traderbot.launcher_services import HumanizedEvent, LauncherEvent
 
@@ -562,6 +562,14 @@ class SettingsDialog(QDialog):
     ):
         super().__init__(parent)
         self.cfg = cfg
+        env_defaults = EnvironmentConfig()
+        self._dialog_defaults = {
+            "risk_pct": float(self.cfg.environment.max_risk_per_trade) * 100.0,
+            "hold_threshold": float(env_defaults.action_hold_threshold),
+            "regime_min_abs_dist_ema_240": float(env_defaults.regime_min_abs_dist_ema_240),
+            "regime_min_vol_regime_z": float(env_defaults.regime_min_vol_regime_z),
+            "auto_check_interval": float(self.cfg.launcher.auto_check_interval_seconds),
+        }
         self.setModal(True)
         self.setWindowTitle("Configuracoes")
         self.resize(620, 520)
@@ -597,6 +605,20 @@ class SettingsDialog(QDialog):
         self.hold_threshold_input.setSingleStep(0.01)
         self.hold_threshold_input.setValue(float(self.cfg.environment.action_hold_threshold))
         self.hold_threshold_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.regime_abs_dist_input = QDoubleSpinBox()
+        self.regime_abs_dist_input.setRange(0.0, 1.0)
+        self.regime_abs_dist_input.setDecimals(3)
+        self.regime_abs_dist_input.setSingleStep(0.005)
+        self.regime_abs_dist_input.setValue(float(self.cfg.environment.regime_min_abs_dist_ema_240))
+        self.regime_abs_dist_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.regime_vol_input = QDoubleSpinBox()
+        self.regime_vol_input.setRange(-3.0, 3.0)
+        self.regime_vol_input.setDecimals(2)
+        self.regime_vol_input.setSingleStep(0.05)
+        self.regime_vol_input.setValue(float(self.cfg.environment.regime_min_vol_regime_z))
+        self.regime_vol_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.openai_status_label = QLabel("")
         self.openai_status_label.setObjectName("badge")
@@ -634,8 +656,12 @@ class SettingsDialog(QDialog):
         form.addWidget(self.risk_input, 0, 1)
         form.addWidget(self._field_label("Filtro HOLD"), 1, 0)
         form.addWidget(self.hold_threshold_input, 1, 1)
-        form.addWidget(self._field_label("Auto check"), 2, 0)
-        form.addWidget(self.autocheck_input, 2, 1)
+        form.addWidget(self._field_label("Regime min dist EMA240"), 2, 0)
+        form.addWidget(self.regime_abs_dist_input, 2, 1)
+        form.addWidget(self._field_label("Regime min vol z"), 3, 0)
+        form.addWidget(self.regime_vol_input, 3, 1)
+        form.addWidget(self._field_label("Auto check"), 4, 0)
+        form.addWidget(self.autocheck_input, 4, 1)
 
         root.addLayout(form)
         openai_row = QHBoxLayout()
@@ -666,6 +692,11 @@ class SettingsDialog(QDialog):
         root.addWidget(self.advanced_frame)
 
         footer = QHBoxLayout()
+
+        self.reset_button = QPushButton("Voltar ao padrao")
+        self.reset_button.clicked.connect(self._reset_to_defaults)
+        footer.addWidget(self.reset_button)
+
         footer.addStretch(1)
 
         self.cancel_button = QPushButton("Cancelar")
@@ -694,6 +725,13 @@ class SettingsDialog(QDialog):
         self.advanced_button.setText("Ocultar avancado" if expanded else "Avancado")
         self.advanced_frame.setVisible(expanded)
 
+    def _reset_to_defaults(self) -> None:
+        self.risk_input.setValue(float(self._dialog_defaults["risk_pct"]))
+        self.hold_threshold_input.setValue(float(self._dialog_defaults["hold_threshold"]))
+        self.regime_abs_dist_input.setValue(float(self._dialog_defaults["regime_min_abs_dist_ema_240"]))
+        self.regime_vol_input.setValue(float(self._dialog_defaults["regime_min_vol_regime_z"]))
+        self.autocheck_input.setValue(float(self._dialog_defaults["auto_check_interval"]))
+
     def _refresh_openai_state(self) -> None:
         key_name = self.cfg.launcher.openai_api_key_env or "OPENAI_API_KEY"
         has_key = _has_env_value(key_name)
@@ -721,6 +759,12 @@ class SettingsDialog(QDialog):
 
     def hold_threshold(self) -> float:
         return float(self.hold_threshold_input.value())
+
+    def regime_min_abs_dist_ema_240(self) -> float:
+        return float(self.regime_abs_dist_input.value())
+
+    def regime_min_vol_regime_z(self) -> float:
+        return float(self.regime_vol_input.value())
 
     def auto_check_interval(self) -> int:
         return int(self.autocheck_input.value())
@@ -1910,6 +1954,8 @@ class TraderBotLauncher(QMainWindow):
         self._save_settings(
             max_risk_per_trade=dialog.risk_pct(),
             action_hold_threshold=dialog.hold_threshold(),
+            regime_min_abs_dist_ema_240=dialog.regime_min_abs_dist_ema_240(),
+            regime_min_vol_regime_z=dialog.regime_min_vol_regime_z(),
             auto_check_interval=dialog.auto_check_interval(),
         )
 
@@ -1918,6 +1964,8 @@ class TraderBotLauncher(QMainWindow):
         *,
         max_risk_per_trade: float,
         action_hold_threshold: float,
+        regime_min_abs_dist_ema_240: float,
+        regime_min_vol_regime_z: float,
         auto_check_interval: int,
     ) -> None:
         path = Path(self.config_path)
@@ -1927,6 +1975,8 @@ class TraderBotLauncher(QMainWindow):
         raw.setdefault("environment", {})
         raw["environment"]["max_risk_per_trade"] = float(max_risk_per_trade)
         raw["environment"]["action_hold_threshold"] = float(action_hold_threshold)
+        raw["environment"]["regime_min_abs_dist_ema_240"] = float(regime_min_abs_dist_ema_240)
+        raw["environment"]["regime_min_vol_regime_z"] = float(regime_min_vol_regime_z)
 
         raw.setdefault("launcher", {})
         raw["launcher"].pop("openai_enabled", None)
@@ -1954,6 +2004,8 @@ class TraderBotLauncher(QMainWindow):
                 message=(
                     f"Configuracoes salvas. Risco {self.cfg.environment.max_risk_per_trade * 100.0:.2f}%, "
                     f"filtro HOLD {self.cfg.environment.action_hold_threshold:.2f}, "
+                    f"regime dist>={self.cfg.environment.regime_min_abs_dist_ema_240:.3f}, "
+                    f"regime vol>={self.cfg.environment.regime_min_vol_regime_z:.2f}, "
                     f"auto check {int(self.cfg.launcher.auto_check_interval_seconds)}s e OpenAI "
                     f"{'pronta' if has_key else 'sem chave'}."
                 ),
