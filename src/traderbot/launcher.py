@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import socket
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -419,6 +422,7 @@ class EventToast(QFrame):
         super().__init__(parent)
         self.setObjectName("EventToast")
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.setMinimumWidth(420)
         self.setMaximumWidth(560)
 
@@ -1391,6 +1395,39 @@ class TraderBotLauncher(QMainWindow):
         if hasattr(self, "_active_toast") and self._active_toast is not None and self._active_toast.isVisible():
             self._position_toast(self._active_toast)
 
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """Interceta o fecho da janela para evitar processos zumbis e proteger posições abertas."""
+        bot_running = self.run_process.state() != QProcess.NotRunning
+        position_open = self.state.position_label in {"LONG", "SHORT"}
+
+        if bot_running and position_open:
+            answer = QMessageBox.warning(
+                self,
+                "Atenção: Posição Aberta!",
+                "Existe uma posição aberta na exchange!\n\n"
+                "Se fechar o Launcher agora, o bot irá parar e a posição ficará à deriva.\n"
+                "Deseja fechar mesmo assim?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                event.ignore()
+                return
+
+        # Limpar requisicoes da IA que ficaram presas na fila e dar no maximo 1 segundo para terminarem
+        self._thread_pool.clear()
+        self._thread_pool.waitForDone(1000)
+
+        if bot_running:
+            self.run_process.terminate()
+            self.run_process.waitForFinished(2000)
+
+        if self.task_process.state() != QProcess.NotRunning:
+            self.task_process.terminate()
+            self.task_process.waitForFinished(2000)
+
+        event.accept()
+
     def _sync_mode_buttons(self) -> None:
         mode = self._current_mode()
         self.mode_badge.setText(mode.label.upper())
@@ -1675,7 +1712,13 @@ class TraderBotLauncher(QMainWindow):
             return
 
         self.runtime_stop_requested = True
-        self.run_process.kill()
+        self.run_process.terminate()
+
+        # Fallback de seguranca para garantir o encerramento apos 3 segundos se o terminate falhar
+        QTimer.singleShot(
+            3000,
+            lambda: self.run_process.kill() if self.run_process.state() != QProcess.NotRunning else None,
+        )
 
     def _switch_mode(self, mode_key: str) -> None:
         if mode_key == self.current_mode:
@@ -1774,23 +1817,30 @@ class TraderBotLauncher(QMainWindow):
             self._execute_pending_kill_switch()
 
     def _execute_pending_kill_switch(self) -> None:
-        if not self.pending_emergency_close or self.task_process.state() != QProcess.NotRunning:
+        if not self.pending_emergency_close:
             return
+
+        # Se houver uma tarefa rodando (ex: healthcheck travado), matamos sem piedade
+        # para libertar a via para o comando de emergencia.
+        if self.task_process.state() != QProcess.NotRunning:
+            self.task_process.kill()
+            self.task_process.waitForFinished(1000)
+
         self.pending_emergency_close = False
         args = self._build_base_args(self._current_mode()) + ["close-hyperliquid-position"]
         self._start_process(self.task_process, args, label="Kill switch", silent=False)
 
     def _handle_run_output(self) -> None:
-        payload = bytes(self.run_process.readAllStandardOutput()).decode("utf-8", errors="ignore")
-        for raw_line in payload.splitlines():
+        while self.run_process.canReadLine():
+            raw_line = bytes(self.run_process.readLine()).decode("utf-8", errors="ignore").strip()
             self._parse_line(raw_line, source="run")
 
     def _handle_run_stderr(self) -> None:
         self._append_process_stderr(self.run_process)
 
     def _handle_task_output(self) -> None:
-        payload = bytes(self.task_process.readAllStandardOutput()).decode("utf-8", errors="ignore")
-        for raw_line in payload.splitlines():
+        while self.task_process.canReadLine():
+            raw_line = bytes(self.task_process.readLine()).decode("utf-8", errors="ignore").strip()
             self._parse_line(raw_line, source="task")
 
     def _handle_task_stderr(self) -> None:
@@ -2069,10 +2119,15 @@ class TraderBotLauncher(QMainWindow):
         self._active_toast.raise_()
 
     def _apply_translated_notification(self, widget: NotificationItemWidget, result: HumanizedEvent) -> None:
-        if widget is None:
-            return
-        widget.apply_summary(result)
-        self._apply_humanized_cycle_details(result)
+        try:
+            if widget is None:
+                return
+            widget.apply_summary(result)
+            self._apply_humanized_cycle_details(result)
+        except RuntimeError:
+            # O widget C++ ja foi destruido pelo _trim_notifications antes da IA terminar a traducao.
+            # Ignoramos silenciosamente para evitar crash do PySide6.
+            pass
 
     def _apply_humanized_cycle_details(self, result: HumanizedEvent) -> None:
         if result.event_type != "cycle":
@@ -2504,8 +2559,85 @@ class TraderBotLauncher(QMainWindow):
         return parts[3].strip()
 
 
+def _run_launcher_with_pid_lock(app: QApplication) -> int:
+    pid_file = REPO_ROOT / "launcher.pid"
+    global _launcher_lock
+    _launcher_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    try:
+        # Tenta travar a porta para garantir que e a unica instancia
+        _launcher_lock.bind(("127.0.0.1", 54321))
+        # Se conseguiu, salva o PID atual no arquivo
+        with open(pid_file, "w") as f:
+            f.write(str(os.getpid()))
+    except socket.error:
+        # Se a porta falhou, existe um zumbi. Vamos tentar ler o PID dele.
+        old_pid = None
+        if pid_file.exists():
+            try:
+                old_pid = int(pid_file.read_text().strip())
+            except ValueError:
+                pass
+
+        msg = "O TraderBot Launcher ja esta rodando (provavelmente preso invisivel em segundo plano).\n\n"
+        if old_pid:
+            msg += f"Deseja forcar o encerramento da instancia fantasma (PID: {old_pid}) para liberar o sistema?"
+        else:
+            msg += "Nao encontrei o PID para matar automaticamente. Voce tera que fechar o 'pythonw.exe' pelo Gerenciador de Tarefas do Windows."
+
+        answer = QMessageBox.warning(
+            None,
+            "Instancia Fantasma Detectada",
+            msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if answer == QMessageBox.Yes and old_pid:
+            try:
+                if os.name == "nt":  # Se for Windows
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", str(old_pid)],
+                        check=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                else:  # Se for Linux/Mac
+                    os.kill(old_pid, signal.SIGKILL)
+                QMessageBox.information(
+                    None,
+                    "Resolvido",
+                    "Instancia fantasma encerrada com sucesso!\nVoce ja pode abrir o Launcher normalmente.",
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    None,
+                    "Erro",
+                    f"Nao foi possivel matar o processo fantasma.\nDetalhes: {e}\n\nAbra o Gerenciador de Tarefas (Ctrl+Shift+Esc), procure por 'pythonw.exe' e finalize a tarefa manualmente.",
+                )
+        return 1
+
+    app.setStyle("Fusion")
+    app.setFont(QFont("Segoe UI", 10))
+    theme_path = REPO_ROOT / "theme.qss"
+    if theme_path.exists():
+        app.setStyleSheet(theme_path.read_text(encoding="utf-8"))
+    window = TraderBotLauncher()
+    window.show()
+    return app.exec()
+
+
 def main() -> int:
     app = QApplication(sys.argv)
+    return _run_launcher_with_pid_lock(app)
+
+    # Single Instance Lock para o Launcher
+    _launcher_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _launcher_lock.bind(("127.0.0.1", 54321))
+    except socket.error:
+        QMessageBox.critical(None, "Acesso Negado", "O TraderBot Launcher já está aberto!")
+        return 1
+
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 10))
     theme_path = REPO_ROOT / "theme.qss"

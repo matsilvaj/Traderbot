@@ -37,6 +37,7 @@ Thumbs.db
 
 # Project-generated artifacts
 /logs/
+/launcher.pid
 /models/*
 !/models/*.zip
 !/models/*.pkl

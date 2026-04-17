@@ -3,6 +3,8 @@
 import argparse
 import gc
 import json
+import socket
+import sys
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -30,6 +32,18 @@ from traderbot.utils.logger import setup_logger
 from traderbot.utils.telegram_notifier import TelegramNotifier
 
 DEFAULT_MULTI_SEEDS = [1, 7, 21, 42, 84, 123, 256, 512, 999, 2004]
+_bot_lock: socket.socket | None = None
+
+
+def _acquire_bot_lock() -> None:
+    global _bot_lock  # Mantem a referencia viva na memoria
+    _bot_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _bot_lock.bind(("127.0.0.1", 54322))
+    except socket.error:
+        print("\n[ERRO CRITICO] O Bot ja esta em execucao em outro terminal ou pelo Launcher!")
+        print("Feche a outra instancia antes de iniciar uma nova para evitar ordens duplicadas.\n")
+        sys.exit(1)
 
 
 def vecnormalize_stats_path(model_path: str | Path) -> Path:
@@ -1713,6 +1727,7 @@ def parse_args():
 
 
 def main():
+    _acquire_bot_lock()
     args = parse_args()
     cfg = load_config(args.config)
     ensure_directories(cfg)

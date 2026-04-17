@@ -44,7 +44,7 @@ python -m traderbot.launcher
 No Windows, voce tambem pode abrir direto por:
 
 ```powershell
-Abrir_TraderBot.bat
+Trader Laucher.bat
 ```
 
 O launcher permite:

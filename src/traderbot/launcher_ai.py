@@ -314,6 +314,13 @@ class OpenAILogTranslator:
             result = fallback
 
         with self._lock:
+            # Prevencao de memory leak: limitar o cache a 200 itens.
+            if len(self._cache) >= 200:
+                # Remove os 50 itens mais antigos para liberar espaco.
+                velhos = list(self._cache.keys())[:50]
+                for k in velhos:
+                    del self._cache[k]
+
             self._cache[key] = result
         return result
 
