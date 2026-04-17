@@ -7,6 +7,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import ctypes
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Any
 
 import yaml
 from PySide6.QtCore import QObject, QProcess, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -43,6 +44,8 @@ from traderbot.launcher_services import HumanizedEvent, LauncherEvent
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config.yaml"
+LAUNCHER_ICON_PATH = REPO_ROOT / "icon" / "icon.ico"
+WINDOWS_APP_ID = "traderbot.launcher.desktop"
 
 HUMANIZED_MARKET_PLACEHOLDER = "Aguardando leitura humanizada do mercado."
 HUMANIZED_MODEL_PLACEHOLDER = "Aguardando interpretacao humanizada do modelo."
@@ -139,6 +142,15 @@ def _json_marker(line: str, marker: str) -> dict[str, Any] | None:
         return json.loads(payload)
     except json.JSONDecodeError:
         return None
+
+
+def _apply_windows_app_identity() -> None:
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_ID)
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -742,7 +754,9 @@ class TraderBotLauncher(QMainWindow):
             self._handle_task_finished,
         )
 
-        self.setWindowTitle("TraderBot Launcher")
+        self.setWindowTitle("Trader Laucher")
+        if LAUNCHER_ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(LAUNCHER_ICON_PATH)))
         self.resize(1280, 820)
         self.setMinimumSize(960, 680)
 
@@ -2733,6 +2747,8 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
 
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 10))
+    if LAUNCHER_ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(LAUNCHER_ICON_PATH)))
     theme_path = REPO_ROOT / "theme.qss"
     if theme_path.exists():
         app.setStyleSheet(theme_path.read_text(encoding="utf-8"))
@@ -2753,7 +2769,10 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
 
 
 def main() -> int:
+    _apply_windows_app_identity()
     app = QApplication(sys.argv)
+    app.setApplicationName("Trader Laucher")
+    app.setApplicationDisplayName("Trader Laucher")
     return _run_launcher_with_pid_lock(app)
 
 
