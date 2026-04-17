@@ -40,6 +40,11 @@ from traderbot.launcher_services import HumanizedEvent, LauncherEvent
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "config.yaml"
 
+HUMANIZED_MARKET_PLACEHOLDER = "Aguardando leitura humanizada do mercado."
+HUMANIZED_MODEL_PLACEHOLDER = "Aguardando interpretacao humanizada do modelo."
+HUMANIZED_FILTERS_PLACEHOLDER = "Aguardando diagnostico humanizado dos filtros."
+HUMANIZED_EXECUTION_PLACEHOLDER = "Aguardando resumo humanizado da execucao."
+
 
 def _currency(value: Any, prefix: str = "$") -> str:
     try:
@@ -186,8 +191,8 @@ class DashboardState:
     blocked_today_label: str = "0"
     last_trade_reason_label: str = "Nenhuma operação hoje."
     last_skip_reason_label: str = "Nenhum bloqueio recente."
-    context_summary_label: str = "Sem contexto recente."
-    feature_summary_label: str = "Sem leitura recente das features."
+    context_summary_label: str = HUMANIZED_MARKET_PLACEHOLDER
+    feature_summary_label: str = HUMANIZED_MODEL_PLACEHOLDER
     humanized_market_state: str = ""
     humanized_model_interpretation: str = ""
     humanized_filters_diagnostic: str = ""
@@ -337,46 +342,15 @@ class DetailFieldCard(QFrame):
         _configure_dynamic_label(self.summary)
         layout.addWidget(self.summary)
 
-        self.fields_grid = QGridLayout()
-        self.fields_grid.setContentsMargins(0, 0, 0, 0)
-        self.fields_grid.setHorizontalSpacing(12)
-        self.fields_grid.setVerticalSpacing(8)
-        self.fields_grid.setColumnStretch(0, 1)
-        self.fields_grid.setColumnStretch(1, 2)
-        layout.addLayout(self.fields_grid)
-
         self.note = QLabel("")
         self.note.setObjectName("HeroHint")
         _configure_dynamic_label(self.note)
         self.note.hide()
         layout.addWidget(self.note)
 
-        self._field_values: dict[str, QLabel] = {}
-
-    def add_field(self, key: str, label: str) -> None:
-        row = len(self._field_values)
-        label_widget = QLabel(label)
-        label_widget.setObjectName("MetricLabel")
-        label_widget.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.fields_grid.addWidget(label_widget, row, 0, Qt.AlignTop)
-
-        value_widget = QLabel("--")
-        value_widget.setObjectName("metricValue")
-        value_widget.setProperty("sizeVariant", "body")
-        _configure_dynamic_label(value_widget)
-        self.fields_grid.addWidget(value_widget, row, 1)
-        self._field_values[key] = value_widget
-
     def set_summary(self, text: str) -> None:
         self.summary.setText(text)
         _fit_label_height(self.summary)
-
-    def set_field(self, key: str, text: str) -> None:
-        value_widget = self._field_values.get(key)
-        if value_widget is None:
-            return
-        value_widget.setText(text)
-        _fit_label_height(value_widget)
 
     def set_note(self, text: str | None) -> None:
         if text:
@@ -1140,9 +1114,9 @@ class TraderBotLauncher(QMainWindow):
         self.details_technical_stack.currentChanged.connect(self._update_details_carousel_navigation)
         content_layout.addWidget(self.details_technical_stack)
 
-        self.indicators_card = DetailFieldCard("Card de Indicadores")
-        self.intelligence_card = DetailFieldCard("Card de Inteligencia")
-        self.filters_card = DetailFieldCard("Card de Filtros")
+        self.indicators_card = DetailFieldCard("Leitura do Mercado")
+        self.intelligence_card = DetailFieldCard("Interpretacao do Modelo")
+        self.filters_card = DetailFieldCard("Diagnostico dos Filtros")
 
         self.details_technical_cards = [
             self.indicators_card,
@@ -1269,13 +1243,6 @@ class TraderBotLauncher(QMainWindow):
         if page_key == "events":
             self.unread_events = 0
         self._update_navigation_state()
-
-    def _update_navigation_state(self) -> None:
-        for key, button in self.page_buttons.items():
-            button.setChecked(key == self.current_page)
-            unread = key == "events" and self.unread_events > 0
-            button.setText("Eventos •" if unread else {"dashboard": "Dashboard", "details": "Detalhes", "events": "Eventos"}[key])
-            _set_widget_property(button, "unread", unread)
 
     def _clear_layout(self, layout: QGridLayout) -> None:
         while layout.count():
@@ -1768,25 +1735,6 @@ class TraderBotLauncher(QMainWindow):
         except (TypeError, ValueError):
             return "1"
 
-    def _build_context_summary(self, payload: dict[str, Any]) -> str:
-        vote_bucket = str(payload.get("vote_bucket", "hold")).upper()
-        regime_text = "regime válido" if payload.get("regime_valid") else "regime inválido"
-        signal_text = self._signal_label(float(payload.get("final_action", 0.0) or 0.0))
-        force_text = _strength(payload.get("final_action", 0.0))
-        return f"{signal_text} | ensemble {vote_bucket} | {regime_text} | força {force_text}"
-
-    def _build_feature_summary(self, payload: dict[str, Any]) -> str:
-        parts: list[str] = []
-        if payload.get("regime_dist_ema_240") not in (None, ""):
-            parts.append(f"dist_ema_240 {float(payload.get('regime_dist_ema_240')):.3f}")
-        if payload.get("regime_vol_regime_z") not in (None, ""):
-            parts.append(f"vol_z {float(payload.get('regime_vol_regime_z')):.2f}")
-        if payload.get("breakout_up_10") not in (None, ""):
-            parts.append(f"brk_up {payload.get('breakout_up_10')}")
-        if payload.get("breakout_down_10") not in (None, ""):
-            parts.append(f"brk_down {payload.get('breakout_down_10')}")
-        return " | ".join(parts) if parts else "Sem leitura recente das features."
-
     def _apply_status_payload(self, payload: dict[str, Any], *, source: str) -> None:
         check_at = datetime.now()
         connected = bool(payload.get("connected"))
@@ -1833,90 +1781,6 @@ class TraderBotLauncher(QMainWindow):
                 event_code="healthcheck.status",
             )
             self._push_event(event)
-
-    def _apply_cycle_payload(self, payload: dict[str, Any], *, source: str) -> None:
-        self._ensure_daily_rollover()
-        self.health_state.bot_running = True
-        self.health_state.executor_alive = True
-        self.state.last_update_label = datetime.now().strftime("%H:%M:%S")
-        self.state.reference_price = _price(payload.get("reference_price", 0.0))
-        self.state.risk_label = _pct(payload.get("dynamic_risk_pct", payload.get("risk_pct", 0.0)))
-        self.state.strength_label = _strength(payload.get("final_action", 0.0))
-        self.state.regime_label = "válido" if payload.get("regime_valid") else "bloqueado"
-        self.state.signal_label = self._signal_label(float(payload.get("final_action", 0.0) or 0.0))
-        self.state.direction_label = str(payload.get("vote_bucket", "--")).upper()
-        self.state.balance_label = _currency(payload.get("available_to_trade", 0.0))
-        self.state.blocker_label = (
-            self._human_block_label(str(payload.get("blocked_reason")))
-            if payload.get("blocked_reason")
-            else "Sem bloqueio"
-        )
-        self.state.context_summary_label = self._build_context_summary(payload)
-        self.state.feature_summary_label = self._build_feature_summary(payload)
-        self.state.last_raw_detail = json.dumps(payload, ensure_ascii=False, indent=2)
-
-        position_label = str(payload.get("position_label", "FLAT")).upper()
-        self.state.position_label = position_label
-        self.state.position_size_label = _currency(payload.get("adjusted_notional", payload.get("notional_value", 0.0)))
-        self.state.entry_label = _price(payload.get("position_avg_entry_price", 0.0))
-        self.state.take_profit_label = _price(payload.get("take_profit_price", 0.0))
-        self.state.stop_loss_label = _price(payload.get("stop_loss_price", 0.0))
-        pnl_value = float(payload.get("position_unrealized_pnl", 0.0) or 0.0)
-        self.state.pnl_label = _currency(pnl_value)
-        self.state.pnl_style = "success" if pnl_value >= 0 else "error"
-
-        if payload.get("error"):
-            self.state.state_label = "ERRO"
-            self.state.state_message = "Execução com erro. Revisar operação."
-            self.state.state_style = "error"
-        elif payload.get("blocked_reason"):
-            self.state.state_label = "BLOQUEADO"
-            self.state.state_message = self._human_block_label(str(payload.get("blocked_reason")))
-            self.state.state_style = "blocked"
-        elif payload.get("position_is_open"):
-            self.state.state_label = position_label
-            self.state.state_message = f"Posição {position_label} em andamento."
-            self.state.state_style = "long" if position_label == "LONG" else "short"
-        elif self.state.signal_label == "HOLD":
-            self.state.state_label = "AGUARDANDO"
-            self.state.state_message = "Sem entrada nesta barra."
-            self.state.state_style = "wait"
-        else:
-            self.state.state_label = "FLAT"
-            self.state.state_message = "Sem posição aberta."
-            self.state.state_style = "flat"
-
-        if payload.get("position_is_open"):
-            self.state.position_status = f"{position_label} aberta no momento"
-        elif payload.get("blocked_reason"):
-            self.state.position_status = "Sem posição; entrada bloqueada"
-        else:
-            self.state.position_status = "Sem sinal ativo"
-
-        self._refresh_dashboard()
-
-        event = self._new_event(
-            source=source,
-            event_type="cycle",
-            raw_line=json.dumps(payload, ensure_ascii=False),
-            payload=payload,
-            severity="execution",
-            event_code="execution.cycle",
-        )
-        summary = self.log_translator.local.summarize(event)
-        if payload.get("opened_trade"):
-            self.state.operations_today_label = self._increment_counter_label(self.state.operations_today_label)
-            self.state.last_trade_reason_label = summary.message_human
-        elif payload.get("closed_trade"):
-            self.state.last_trade_reason_label = summary.message_human
-        elif payload.get("blocked_reason"):
-            self.state.blocked_today_label = self._increment_counter_label(self.state.blocked_today_label)
-            self.state.last_skip_reason_label = summary.message_human
-        else:
-            self.state.last_skip_reason_label = summary.message_human
-        self.state.last_decision = summary.message_human
-        self._refresh_dashboard()
-        self._push_event(event, prebuilt=summary)
 
     def _apply_smoke_payload(self, payload: dict[str, Any], *, source: str) -> None:
         event = self._new_event(
@@ -2061,103 +1925,6 @@ class TraderBotLauncher(QMainWindow):
         if updated:
             self._refresh_dashboard()
 
-    def _refresh_dashboard(self) -> None:
-        self.state.symbol_label = str(self.cfg.hyperliquid.symbol)
-        self.state.timeframe_label = str(self.cfg.hyperliquid.timeframe)
-        self.state.execution_mode_label = str(self._current_mode().execution_mode)
-        self.state.connection_label = self.health_state.status
-        self.state.last_valid_check_label = (
-            self.health_state.last_successful_healthcheck_at.strftime("%H:%M:%S")
-            if self.health_state.last_successful_healthcheck_at is not None
-            else "--"
-        )
-        self.mode_badge.setText(self.state.network_label)
-        self.state_pill.setText(self.state.state_label)
-        _set_widget_property(self.state_pill, "status", self.state.state_style)
-        dashboard_summary = _display_value(self.state.humanized_simple_summary, self.state.state_message)
-        self.state_message.setText(dashboard_summary)
-        self.balance_inline.setText(self.state.balance_label)
-        _fit_label_height(self.state_message)
-        _fit_label_height(self.balance_inline)
-        self.state_message.updateGeometry()
-
-        self.signal_tile.update_tile(_display_value(self.state.signal_label, "nenhum"), tone="default")
-        reason_value = self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else dashboard_summary
-        self.reason_tile.update_tile(_display_value(reason_value, "indefinido"), tone="default")
-        self.price_tile.update_tile(self.state.reference_price, tone="default")
-        self.risk_tile.update_tile(self.state.risk_label, tone="warning")
-        self.position_tile.update_tile(_display_value(self.state.position_label, "FLAT"), tone="default")
-        self.pnl_tile.update_tile(self.state.pnl_label, tone=self.state.pnl_style)
-
-        self.position_pill.setText(self.state.position_label)
-        position_style = "long" if self.state.position_label == "LONG" else "short" if self.state.position_label == "SHORT" else "flat"
-        _set_widget_property(self.position_pill, "status", position_style)
-        self.position_status.setText(self.state.position_status)
-        _fit_label_height(self.position_status)
-        self.position_status.updateGeometry()
-        self.pnl_value.setText(self.state.pnl_label)
-        _fit_label_height(self.pnl_value)
-        _set_widget_property(self.pnl_value, "tone", self.state.pnl_style)
-        self.position_size_value.setText(self.state.position_size_label)
-        _fit_label_height(self.position_size_value)
-        self.entry_value.setText(self.state.entry_label)
-        _fit_label_height(self.entry_value)
-        self.tp_value.setText(self.state.take_profit_label)
-        _fit_label_height(self.tp_value)
-        self.sl_value.setText(self.state.stop_loss_label)
-        _fit_label_height(self.sl_value)
-
-        self.connection_tile.update_tile(_display_value(self.state.connection_label, "offline"), tone="default")
-        self.heartbeat_tile.update_tile(_display_value(self.state.last_valid_check_label, "--"), tone="default")
-        self.operations_today_tile.update_tile(_display_value(self.state.operations_today_label, "0"), tone="default")
-        self.blocked_today_tile.update_tile(_display_value(self.state.blocked_today_label, "0"), tone="default")
-
-        def set_detail_block(value_label: QLabel, value_text: str, note_label: QLabel, note_text: str | None = None) -> None:
-            value_label.setText(value_text)
-            _fit_label_height(value_label)
-            if note_text:
-                note_label.setText(note_text)
-                _fit_label_height(note_label)
-                note_label.show()
-            else:
-                note_label.hide()
-
-        current_reason = self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else self.state.state_message
-
-        self.details_decision_label.setText(self.state.last_decision)
-        _fit_label_height(self.details_decision_label)
-        self.details_decision_reason_label.setText(current_reason)
-        _fit_label_height(self.details_decision_reason_label)
-        self.details_decision_meta_label.setText(
-            f"Sinal {self.state.signal_label} • Direção {self.state.direction_label} • Regime {self.state.regime_label} • Posição {self.state.position_label}"
-        )
-        _fit_label_height(self.details_decision_meta_label)
-
-        set_detail_block(
-            self.details_context_value,
-            self.state.context_summary_label,
-            self.details_context_note,
-            f"Preço de referência {self.state.reference_price} • Risco {self.state.risk_label}",
-        )
-        set_detail_block(
-            self.details_trade_value,
-            self.state.last_trade_reason_label,
-            self.details_trade_note,
-            f"Posição atual {self.state.position_label} • Tamanho {self.state.position_size_label}",
-        )
-        set_detail_block(
-            self.details_skip_value,
-            self.state.last_skip_reason_label,
-            self.details_skip_note,
-            f"Bloqueio atual: {self.state.blocker_label}",
-        )
-        set_detail_block(
-            self.details_features_value,
-            self.state.feature_summary_label,
-            self.details_features_note,
-            f"Entrada {self.state.entry_label} • TP {self.state.take_profit_label} • SL {self.state.stop_loss_label}",
-        )
-
     def _apply_health_status(self, status: str, reason: str, *, emit_event: bool = False) -> None:
         previous_status = self.health_state.status
         self.health_state.status = status
@@ -2210,29 +1977,6 @@ class TraderBotLauncher(QMainWindow):
     def _refresh_connectivity_health(self, *, emit_event: bool = False, forced_reason: str | None = None) -> None:
         status, reason = self._derive_health_status(forced_reason=forced_reason)
         self._apply_health_status(status, reason, emit_event=emit_event)
-
-    def _build_context_summary(self, payload: dict[str, Any]) -> str:
-        decision_snapshot = self._decision_snapshot_from_payload(payload)
-        filter_snapshot = self._filter_snapshot_from_payload(payload)
-        final_action = decision_snapshot.get("final_action", payload.get("final_action", 0.0))
-        vote_bucket = str(decision_snapshot.get("vote_bucket", payload.get("vote_bucket", "hold"))).upper()
-        regime_text = "regime valido" if filter_snapshot.get("regime_valid_for_entry") else "regime invalido"
-        signal_text = self._signal_label(float(final_action or 0.0))
-        force_text = _strength(final_action)
-        return f"{signal_text} | ensemble {vote_bucket} | {regime_text} | forca {force_text}"
-
-    def _build_feature_summary(self, payload: dict[str, Any]) -> str:
-        feature_snapshot = self._feature_snapshot_from_payload(payload)
-        parts: list[str] = []
-        if feature_snapshot.get("dist_ema_240") not in (None, ""):
-            parts.append(f"dist_ema_240 {float(feature_snapshot.get('dist_ema_240')):.3f}")
-        if feature_snapshot.get("vol_regime_z") not in (None, ""):
-            parts.append(f"vol_z {float(feature_snapshot.get('vol_regime_z')):.2f}")
-        if feature_snapshot.get("breakout_up_10") not in (None, ""):
-            parts.append(f"brk_up {feature_snapshot.get('breakout_up_10')}")
-        if feature_snapshot.get("breakout_down_10") not in (None, ""):
-            parts.append(f"brk_down {feature_snapshot.get('breakout_down_10')}")
-        return " | ".join(parts) if parts else "Sem leitura recente das features."
 
     def _snapshot_dict(self, payload: dict[str, Any], key: str) -> dict[str, Any]:
         snapshot = payload.get(key)
@@ -2335,8 +2079,8 @@ class TraderBotLauncher(QMainWindow):
         self.state.direction_label = str(vote_bucket or "--").upper()
         self.state.balance_label = _currency(payload.get("available_to_trade", 0.0))
         self.state.blocker_label = self._human_block_label(str(blocked_reason)) if blocked_reason else "Sem bloqueio"
-        self.state.context_summary_label = self._build_context_summary(payload)
-        self.state.feature_summary_label = self._build_feature_summary(payload)
+        self.state.context_summary_label = HUMANIZED_MARKET_PLACEHOLDER
+        self.state.feature_summary_label = HUMANIZED_MODEL_PLACEHOLDER
         self.state.last_raw_detail = json.dumps(payload, ensure_ascii=False, indent=2)
         self.state.humanized_market_state = ""
         self.state.humanized_model_interpretation = ""
@@ -2394,6 +2138,7 @@ class TraderBotLauncher(QMainWindow):
             event_code="execution.cycle",
         )
         summary = self.log_translator.local.summarize(event)
+        summary_text = str(summary.simple_summary or "").strip() or summary.message_human
         if payload.get("opened_trade"):
             self.state.operations_today_label = self._increment_counter_label(self.state.operations_today_label)
             self.state.last_trade_reason_label = summary.message_human
@@ -2404,7 +2149,9 @@ class TraderBotLauncher(QMainWindow):
             self.state.last_skip_reason_label = summary.message_human
         else:
             self.state.last_skip_reason_label = summary.message_human
-        self.state.last_decision = _display_value(summary.simple_summary, summary.message_human)
+
+        self.state.last_decision = summary_text
+        self.state.state_message = summary_text
         self.state.last_cycle_fingerprint = summary.fingerprint
         self._refresh_dashboard()
         self._push_event(event, prebuilt=summary)
@@ -2430,7 +2177,10 @@ class TraderBotLauncher(QMainWindow):
         self.state_message.updateGeometry()
 
         self.signal_tile.update_tile(_display_value(self.state.signal_label, "nenhum"), tone="default")
-        reason_value = self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else dashboard_summary
+        reason_value = _display_value(
+            self.state.humanized_execution_summary,
+            self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else dashboard_summary,
+        )
         self.reason_tile.update_tile(_display_value(reason_value, "indefinido"), tone="default")
         self.price_tile.update_tile(self.state.reference_price, tone="default")
         self.risk_tile.update_tile(self.state.risk_label, tone="warning")
@@ -2471,18 +2221,24 @@ class TraderBotLauncher(QMainWindow):
                 note_label.hide()
 
         current_reason = self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else dashboard_summary
+        trade_fallback = self.state.last_trade_reason_label
+        if trade_fallback.startswith("Nenhuma "):
+            trade_fallback = HUMANIZED_EXECUTION_PLACEHOLDER
+        filters_fallback = self.state.last_skip_reason_label
+        if filters_fallback == "Nenhum bloqueio recente.":
+            filters_fallback = HUMANIZED_FILTERS_PLACEHOLDER
         detail_simple_summary = _display_value(self.state.humanized_simple_summary, self.state.last_decision)
         detail_execution_summary = _display_value(self.state.humanized_execution_summary, current_reason)
-        detail_market_state = _display_value(self.state.humanized_market_state, self.state.context_summary_label)
+        detail_market_state = _display_value(self.state.humanized_market_state, HUMANIZED_MARKET_PLACEHOLDER)
         detail_model_interpretation = _display_value(
             self.state.humanized_model_interpretation,
-            self.state.feature_summary_label,
+            HUMANIZED_MODEL_PLACEHOLDER,
         )
         detail_filters_diagnostic = _display_value(
             self.state.humanized_filters_diagnostic,
-            self.state.last_skip_reason_label,
+            filters_fallback,
         )
-        detail_trade_summary = _display_value(self.state.humanized_execution_summary, self.state.last_trade_reason_label)
+        detail_trade_summary = _display_value(self.state.humanized_execution_summary, trade_fallback)
 
         self.details_decision_label.setText(detail_simple_summary)
         _fit_label_height(self.details_decision_label)
