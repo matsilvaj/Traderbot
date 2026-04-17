@@ -714,11 +714,21 @@ class TraderBotLauncher(QMainWindow):
         self.runtime_stop_requested = False
         self.stats_day = date.today()
         self._active_toast: EventToast | None = None
+        self._run_stderr_buffer = ""
+        self._task_stderr_buffer = ""
 
         self.log_translator = OpenAILogTranslator(self.cfg)
 
-        self.run_process = self._build_process(self._handle_run_output, self._handle_run_finished)
-        self.task_process = self._build_process(self._handle_task_output, self._handle_task_finished)
+        self.run_process = self._build_process(
+            self._handle_run_output,
+            self._handle_run_stderr,
+            self._handle_run_finished,
+        )
+        self.task_process = self._build_process(
+            self._handle_task_output,
+            self._handle_task_stderr,
+            self._handle_task_finished,
+        )
 
         self.setWindowTitle("TraderBot Launcher")
         self.resize(1280, 820)
@@ -738,10 +748,11 @@ class TraderBotLauncher(QMainWindow):
 
         QTimer.singleShot(350, lambda: self._run_check(silent=True))
 
-    def _build_process(self, output_handler, finished_handler) -> QProcess:
+    def _build_process(self, output_handler, stderr_handler, finished_handler) -> QProcess:
         process = QProcess(self)
-        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.setProcessChannelMode(QProcess.SeparateChannels)
         process.readyReadStandardOutput.connect(output_handler)
+        process.readyReadStandardError.connect(stderr_handler)
         process.finished.connect(finished_handler)
         return process
 
@@ -1394,7 +1405,7 @@ class TraderBotLauncher(QMainWindow):
             button.setEnabled(not run_busy and not task_busy)
         self.refresh_button.setEnabled(not task_busy)
         self.smoke_button.setEnabled(not task_busy and not run_busy)
-        self.settings_button.setEnabled(not task_busy)
+        self.settings_button.setEnabled(not task_busy and not run_busy)
         self.kill_button.setEnabled(not task_busy)
         self.run_button.setText("PARAR BOT" if run_busy else "INICIAR BOT")
         self.smoke_button.setText("Executando..." if task_busy and task_label == "Smoke test" else "Smoke test")
@@ -1443,6 +1454,7 @@ class TraderBotLauncher(QMainWindow):
 
     def _start_process(self, process: QProcess, args: list[str], *, label: str, silent: bool = False) -> bool:
         process.setWorkingDirectory(str(REPO_ROOT))
+        self._reset_process_stderr_buffer(process)
         self._active_task_context = {"label": label, "silent": silent}
         process.start(sys.executable, args)
         if not process.waitForStarted(3000):
@@ -1467,6 +1479,135 @@ class TraderBotLauncher(QMainWindow):
             self._push_event(event)
         self._update_controls()
         return True
+
+    def _reset_process_stderr_buffer(self, process: QProcess) -> None:
+        if process is self.run_process:
+            self._run_stderr_buffer = ""
+            return
+        if process is self.task_process:
+            self._task_stderr_buffer = ""
+
+    def _append_process_stderr(self, process: QProcess) -> None:
+        payload = bytes(process.readAllStandardError()).decode("utf-8", errors="ignore")
+        if not payload:
+            return
+        if process is self.run_process:
+            self._run_stderr_buffer += payload
+            return
+        if process is self.task_process:
+            self._task_stderr_buffer += payload
+
+    def _consume_process_stderr(self, process: QProcess) -> str:
+        if process is self.run_process:
+            payload = self._run_stderr_buffer
+            self._run_stderr_buffer = ""
+            return payload
+        if process is self.task_process:
+            payload = self._task_stderr_buffer
+            self._task_stderr_buffer = ""
+            return payload
+        return ""
+
+    def _stderr_summary_line(self, stderr_buffer: str, *, fallback: str) -> str:
+        for line in reversed(stderr_buffer.splitlines()):
+            candidate = self._strip_prefix(line.strip())
+            if candidate:
+                return candidate
+        return fallback
+
+    def _show_process_error_dialog(self, *, label: str, summary: str, stderr_buffer: str, exit_code: int) -> None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Critical)
+        dialog.setWindowTitle(f"{label} com erro")
+        dialog.setText(summary)
+        dialog.setInformativeText(f"{label} finalizado com falha (exit={exit_code}).")
+        dialog.setDetailedText(stderr_buffer)
+        dialog.setStandardButtons(QMessageBox.Ok)
+        dialog.exec()
+
+    def _emit_process_error(
+        self,
+        *,
+        process_label: str,
+        source: str,
+        exit_code: int,
+        stderr_buffer: str,
+        event_code: str,
+        show_dialog: bool,
+    ) -> None:
+        fallback = f"{process_label} finalizado com codigo {exit_code}."
+        summary = self._stderr_summary_line(stderr_buffer, fallback=fallback)
+        event = self._new_event(
+            source=source,
+            event_type="generic",
+            raw_line=stderr_buffer or fallback,
+            message=summary,
+            payload={
+                "process_label": process_label,
+                "exit_code": exit_code,
+                "stderr_summary": summary,
+            },
+            severity="error",
+            event_code=event_code,
+        )
+        prebuilt = HumanizedEvent(
+            source=event.source,
+            event_type=event.event_type,
+            raw_line=event.raw_line,
+            message=summary,
+            payload=dict(event.payload or {}),
+            occurred_at=event.occurred_at,
+            severity="error",
+            event_code=event.event_code,
+            details=f"{process_label} finalizado com falha (exit={exit_code}).",
+            network=event.network,
+            symbol=event.symbol,
+            timeframe=event.timeframe,
+            color="red",
+            relevant=True,
+            fingerprint=f"{event_code}:{process_label.lower()}:{summary.lower()}",
+            raw_detail=stderr_buffer or fallback,
+            execution_summary=f"{process_label} finalizado com falha (exit={exit_code}).",
+            simple_summary=summary,
+        )
+        self._push_event(event, prebuilt=prebuilt)
+        if show_dialog:
+            self._show_process_error_dialog(
+                label=process_label,
+                summary=summary,
+                stderr_buffer=stderr_buffer or fallback,
+                exit_code=exit_code,
+            )
+
+    def _sync_runtime_stopped_ui(self, *, exit_code: int, stop_requested: bool) -> None:
+        self.health_state.bot_running = False
+        self.health_state.executor_alive = False
+
+        reason = "bot_not_running" if stop_requested else "runtime_process_exited"
+        self._apply_health_status("offline", reason, emit_event=not stop_requested)
+
+        if exit_code != 0 and not stop_requested:
+            summary = "Bot parado após falha do runtime. Revise o erro para retomar a operação."
+            style = "error"
+        else:
+            summary = "Bot parado. Inicie o runtime para voltar a operar."
+            style = "blocked"
+
+        self.state.state_label = "PARADO"
+        self.state.state_message = summary
+        self.state.state_style = style
+        self.state.last_decision = summary
+        self.state.humanized_simple_summary = summary
+        self.state.humanized_execution_summary = summary
+        self.state.last_cycle_fingerprint = ""
+
+        if self.state.position_label in {"LONG", "SHORT"}:
+            self.state.position_status = f"Bot parado; revisar posição {self.state.position_label} na exchange."
+        else:
+            self.state.position_status = "Bot parado. Nenhum runtime ativo."
+
+        self._refresh_dashboard()
+        self._update_controls()
 
     def _run_check(self, *, silent: bool = False) -> None:
         if self.task_process.state() != QProcess.NotRunning:
@@ -1499,6 +1640,16 @@ class TraderBotLauncher(QMainWindow):
             if self._start_process(self.run_process, args, label="Runtime", silent=False):
                 self.health_state.bot_running = True
                 self.health_state.executor_alive = True
+                self.state.state_label = "INICIANDO"
+                self.state.state_message = "Runtime iniciado. Primeira avaliacao em andamento."
+                self.state.state_style = "wait"
+                self.state.last_decision = "Runtime iniciado. Primeira avaliacao em andamento."
+                self.state.humanized_simple_summary = ""
+                self.state.humanized_execution_summary = ""
+                self.state.last_cycle_fingerprint = ""
+                if self.state.position_label not in {"LONG", "SHORT"}:
+                    self.state.position_status = "Aguardando primeira avaliacao do runtime."
+                self._refresh_dashboard()
                 self._push_event(
                     self._new_event(
                         source="launcher",
@@ -1524,8 +1675,6 @@ class TraderBotLauncher(QMainWindow):
             return
 
         self.runtime_stop_requested = True
-        self.health_state.bot_running = False
-        self.health_state.executor_alive = False
         self.run_process.kill()
 
     def _switch_mode(self, mode_key: str) -> None:
@@ -1636,29 +1785,48 @@ class TraderBotLauncher(QMainWindow):
         for raw_line in payload.splitlines():
             self._parse_line(raw_line, source="run")
 
+    def _handle_run_stderr(self) -> None:
+        self._append_process_stderr(self.run_process)
+
     def _handle_task_output(self) -> None:
         payload = bytes(self.task_process.readAllStandardOutput()).decode("utf-8", errors="ignore")
         for raw_line in payload.splitlines():
             self._parse_line(raw_line, source="task")
 
+    def _handle_task_stderr(self) -> None:
+        self._append_process_stderr(self.task_process)
+
     def _handle_run_finished(self, exit_code: int, _status) -> None:
-        self._update_controls()
+        self._handle_run_output()
+        self._handle_run_stderr()
+        stderr_buffer = self._consume_process_stderr(self.run_process)
         stop_requested = self.runtime_stop_requested
         self.runtime_stop_requested = False
-        self.health_state.bot_running = False
-        self.health_state.executor_alive = False
-        self._refresh_connectivity_health(emit_event=not stop_requested, forced_reason="runtime_process_exited" if not stop_requested else None)
-        event = self._new_event(
-            source="launcher",
-            event_type="generic",
-            raw_line=f"Runtime finalizado (exit={exit_code}).",
-            message=f"Runtime finalizado (exit={exit_code}).",
-            severity="warning" if exit_code else "info",
-            event_code="system.runtime_finished",
-        )
-        self._push_event(event)
+        if exit_code != 0 and stderr_buffer.strip():
+            self._emit_process_error(
+                process_label="Runtime",
+                source="run",
+                exit_code=exit_code,
+                stderr_buffer=stderr_buffer,
+                event_code="system.runtime_process_failed",
+                show_dialog=True,
+            )
+        else:
+            event = self._new_event(
+                source="launcher",
+                event_type="generic",
+                raw_line=f"Runtime finalizado (exit={exit_code}).",
+                message=f"Runtime finalizado (exit={exit_code}).",
+                severity="warning" if exit_code else "info",
+                event_code="system.runtime_finished",
+            )
+            self._push_event(event)
+        self._sync_runtime_stopped_ui(exit_code=exit_code, stop_requested=stop_requested)
 
     def _handle_task_finished(self, exit_code: int, _status) -> None:
+        self._handle_task_output()
+        self._handle_task_stderr()
+        stderr_buffer = self._consume_process_stderr(self.task_process)
         label = str(self._active_task_context.get("label") or "")
         silent = bool(self._active_task_context.get("silent"))
         self._update_controls()
@@ -1666,7 +1834,16 @@ class TraderBotLauncher(QMainWindow):
             self.health_state.last_healthcheck_at = datetime.now()
             self.health_state.last_check_execution_ok = False
             self._refresh_connectivity_health(emit_event=True, forced_reason="health_check_command_failed")
-        if exit_code != 0 and not silent:
+        if exit_code != 0 and stderr_buffer.strip():
+            self._emit_process_error(
+                process_label=label or "Processo auxiliar",
+                source="task",
+                exit_code=exit_code,
+                stderr_buffer=stderr_buffer,
+                event_code="system.helper_process_failed",
+                show_dialog=not silent,
+            )
+        elif exit_code != 0 and not silent:
             self._push_event(
                 self._new_event(
                     source="launcher",
@@ -1754,9 +1931,13 @@ class TraderBotLauncher(QMainWindow):
         self.state.last_raw_detail = json.dumps(payload, ensure_ascii=False, indent=2)
         runtime_running = self.run_process.state() != QProcess.NotRunning
         if connected and can_trade and not runtime_running:
-            self.state.state_label = "AGUARDANDO"
-            self.state.state_message = "Sem sinal ativo"
-            self.state.state_style = "wait"
+            self.state.state_label = "PARADO"
+            self.state.state_message = "Conexão validada, mas o bot está parado."
+            self.state.state_style = "blocked"
+            if self.state.position_label in {"LONG", "SHORT"}:
+                self.state.position_status = f"Bot parado; revisar posição {self.state.position_label} na exchange."
+            else:
+                self.state.position_status = "Bot parado. Nenhum runtime ativo."
         self._refresh_connectivity_health(
             emit_event=True,
             forced_reason="check_hyperliquid_ok" if health_ok else "check_hyperliquid_failed",
@@ -1898,6 +2079,8 @@ class TraderBotLauncher(QMainWindow):
             return
         if not result.fingerprint or result.fingerprint != self.state.last_cycle_fingerprint:
             return
+        if self.run_process.state() == QProcess.NotRunning:
+            return
 
         updated = False
         for state_key, value in (
@@ -1957,6 +2140,10 @@ class TraderBotLauncher(QMainWindow):
     def _derive_health_status(self, *, forced_reason: str | None = None) -> tuple[str, str]:
         state = self.health_state
         threshold = max(30, int(self.cfg.launcher.auto_check_interval_seconds) * 2)
+        runtime_running = self.run_process.state() != QProcess.NotRunning
+
+        if not runtime_running:
+            return "offline", forced_reason if forced_reason == "runtime_process_exited" else "bot_not_running"
 
         if state.last_healthcheck_at is None:
             return "offline", forced_reason or "awaiting_first_healthcheck"
