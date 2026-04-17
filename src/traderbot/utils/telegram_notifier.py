@@ -35,7 +35,7 @@ class TelegramNotifier:
                 [
                     "[Traderbot] Bot inicializado",
                     "Status: online",
-                    "Alerta: notificacoes Telegram ativas",
+                    "Alerta: notificações Telegram ativas",
                 ]
             )
         )

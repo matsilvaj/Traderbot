@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import shutil
 import socket
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QStyle,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -277,6 +279,30 @@ def _fit_label_height(label: QLabel) -> None:
         label.setMinimumHeight(hint_height)
 
 
+def _configure_readonly_browser(browser: QTextBrowser) -> None:
+    browser.setReadOnly(True)
+    browser.setAcceptRichText(True)
+    browser.setOpenExternalLinks(False)
+    browser.setFrameShape(QFrame.NoFrame)
+    browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    browser.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    browser.document().setDocumentMargin(0)
+    browser.setStyleSheet("background: transparent; background-color: transparent; border: none;")
+    browser.viewport().setStyleSheet("background: transparent; background-color: transparent; border: none;")
+
+
+def _set_browser_content(browser: QTextBrowser, text: str) -> None:
+    normalized = str(text or "--").strip() or "--"
+    if normalized.startswith("```"):
+        normalized = re.sub(r"^```(?:json|html|markdown|md|text)?\s*|\s*```$", "", normalized, flags=re.IGNORECASE)
+        normalized = normalized.strip() or "--"
+    if re.search(r"<[a-zA-Z][^>]*>", normalized):
+        browser.setHtml(normalized)
+        return
+    browser.setPlainText(normalized)
+
+
 class TranslationSignals(QObject):
     finished = Signal(object)
 
@@ -305,7 +331,7 @@ class MetricTile(QFrame):
         *,
         compact: bool = False,
         wrap_value: bool = False,
-        min_height: int = 136,
+        min_height: int = 120,
     ):
         super().__init__()
         self.setObjectName("card")
@@ -313,8 +339,8 @@ class MetricTile(QFrame):
         self.setMinimumHeight(min_height)
         self._compact = compact
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
 
         self.label = QLabel(label)
         self.label.setObjectName("metaLabel")
@@ -353,11 +379,12 @@ class MetricTile(QFrame):
 
 
 class DetailFieldCard(QFrame):
-    def __init__(self, title: str, *, min_height: int = 224):
+    def __init__(self, title: str, *, min_height: int = 224, rich_summary: bool = False):
         super().__init__()
         self.setObjectName("PositionCard")
         self.setMinimumHeight(min_height)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        self._rich_summary = rich_summary
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
@@ -366,10 +393,17 @@ class DetailFieldCard(QFrame):
         title_label.setObjectName("fieldLabel")
         layout.addWidget(title_label)
 
-        self.summary = QLabel("--")
-        self.summary.setObjectName("metricValue")
-        self.summary.setProperty("sizeVariant", "body")
-        _configure_dynamic_label(self.summary)
+        if rich_summary:
+            self.summary = QTextBrowser()
+            self.summary.setObjectName("metricValue")
+            self.summary.setProperty("sizeVariant", "body")
+            _configure_readonly_browser(self.summary)
+            _set_browser_content(self.summary, "--")
+        else:
+            self.summary = QLabel("--")
+            self.summary.setObjectName("metricValue")
+            self.summary.setProperty("sizeVariant", "body")
+            _configure_dynamic_label(self.summary)
         layout.addWidget(self.summary)
 
         self.note = QLabel("")
@@ -379,6 +413,9 @@ class DetailFieldCard(QFrame):
         layout.addWidget(self.note)
 
     def set_summary(self, text: str) -> None:
+        if self._rich_summary:
+            _set_browser_content(self.summary, text)
+            return
         self.summary.setText(text)
         _fit_label_height(self.summary)
 
@@ -735,15 +772,19 @@ class SettingsDialog(QDialog):
     def _refresh_openai_state(self) -> None:
         key_name = self.cfg.launcher.openai_api_key_env or "OPENAI_API_KEY"
         has_key = _has_env_value(key_name)
-        if has_key:
+        if not self.cfg.launcher.openai_enabled:
+            self.openai_status_label.setText("Desativado")
+            _set_widget_property(self.openai_status_label, "severity", "blocked")
+            self.api_key_hint.setText("OpenAI foi desativada nas configuracoes do launcher.")
+        elif has_key:
             self.openai_status_label.setText("Ativo")
             _set_widget_property(self.openai_status_label, "severity", "execution")
-            self.api_key_hint.setText(f"OpenAI fica sempre ativa no launcher. Chave detectada via {key_name}.")
+            self.api_key_hint.setText(f"OpenAI ativa no launcher. Chave detectada via {key_name}.")
         else:
             self.openai_status_label.setText("Sem chave")
             _set_widget_property(self.openai_status_label, "severity", "warning")
             self.api_key_hint.setText(
-                f"OpenAI fica sempre ativa no launcher, mas nenhuma chave foi detectada em {key_name}. "
+                f"OpenAI esta habilitada, mas nenhuma chave foi detectada em {key_name}. "
                 "Sem isso, o resumo local continua como fallback."
             )
         _fit_label_height(self.api_key_hint)
@@ -1038,16 +1079,19 @@ class TraderBotLauncher(QMainWindow):
             self.position_tile,
             self.pnl_tile,
         ]
+        for tile in self.dashboard_metric_tiles:
+            tile.setMinimumHeight(104)
+        self.reason_tile.setMinimumHeight(122)
         layout.addLayout(self.dashboard_metrics_grid)
 
         position = QFrame()
         position.setObjectName("PositionCard")
         position_layout = QVBoxLayout(position)
-        position_layout.setContentsMargins(18, 18, 18, 18)
-        position_layout.setSpacing(12)
+        position_layout.setContentsMargins(14, 14, 14, 14)
+        position_layout.setSpacing(10)
 
         position_top = QHBoxLayout()
-        position_top.setSpacing(12)
+        position_top.setSpacing(10)
 
         position_meta = QVBoxLayout()
         position_meta.setSpacing(6)
@@ -1113,7 +1157,6 @@ class TraderBotLauncher(QMainWindow):
         self.details_scroll.setFrameShape(QFrame.NoFrame)
         self.details_scroll.setObjectName("DetailsScroll")
         self.details_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.details_scroll.viewport().setObjectName("DetailsViewport")
 
         details_host = QWidget()
         details_host.setObjectName("DetailsHost")
@@ -1122,158 +1165,66 @@ class TraderBotLauncher(QMainWindow):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(18)
 
-        self.details_overview_grid = QGridLayout()
-        self.details_overview_grid.setContentsMargins(0, 0, 0, 0)
-        self.details_overview_grid.setHorizontalSpacing(14)
-        self.details_overview_grid.setVerticalSpacing(14)
-        content_layout.addLayout(self.details_overview_grid)
-
-        hero_card = QFrame()
-        hero_card.setObjectName("PositionCard")
-        hero_card.setMinimumHeight(152)
-        hero_layout = QVBoxLayout(hero_card)
-        hero_layout.setContentsMargins(18, 16, 18, 16)
-        hero_layout.setSpacing(8)
-
-        hero_eyebrow = QLabel("Última decisão relevante")
-        hero_eyebrow.setObjectName("fieldLabel")
-        hero_layout.addWidget(hero_eyebrow)
-
-        self.details_decision_label = QLabel("Sem decisão no momento.")
-        self.details_decision_label.setObjectName("PositionStatus")
-        _configure_dynamic_label(self.details_decision_label)
-        hero_layout.addWidget(self.details_decision_label)
-
-        self.details_decision_reason_label = QLabel("Sem contexto recente.")
-        self.details_decision_reason_label.setObjectName("HeroHint")
-        _configure_dynamic_label(self.details_decision_reason_label)
-        hero_layout.addWidget(self.details_decision_reason_label)
-
-        self.details_decision_meta_label = QLabel(
-            "Sinal nenhum • Direção nenhuma • Regime indefinido • Posição FLAT"
-        )
-        self.details_decision_meta_label.setObjectName("subtleText")
-        _configure_dynamic_label(self.details_decision_meta_label)
-        hero_layout.addWidget(self.details_decision_meta_label)
-
-        self.details_overview_cards = [hero_card]
-
         self.details_metrics_grid = QGridLayout()
         self.details_metrics_grid.setContentsMargins(0, 0, 0, 0)
         self.details_metrics_grid.setHorizontalSpacing(14)
         self.details_metrics_grid.setVerticalSpacing(14)
 
-        self.connection_tile = MetricTile("Conexão", compact=True, min_height=92)
         self.heartbeat_tile = MetricTile("Último check válido", compact=True, min_height=92)
         self.operations_today_tile = MetricTile("Operações hoje", compact=True, min_height=92)
         self.blocked_today_tile = MetricTile("Bloqueios hoje", compact=True, min_height=92)
         self.details_metric_tiles = [
-            self.connection_tile,
             self.heartbeat_tile,
             self.operations_today_tile,
             self.blocked_today_tile,
         ]
         content_layout.addLayout(self.details_metrics_grid)
 
-        technical_header = QHBoxLayout()
-        technical_header.setSpacing(10)
+        decision_card = QFrame()
+        decision_card.setObjectName("PositionCard")
+        decision_layout = QVBoxLayout(decision_card)
+        decision_layout.setContentsMargins(18, 16, 18, 16)
+        decision_layout.setSpacing(8)
 
-        technical_copy = QVBoxLayout()
-        technical_copy.setSpacing(4)
-        technical_title = QLabel("Analise tecnica do ultimo ciclo")
-        technical_title.setObjectName("fieldLabel")
-        technical_copy.addWidget(technical_title)
+        decision_title = QLabel("Última Decisão do Ensemble")
+        decision_title.setObjectName("fieldLabel")
+        decision_layout.addWidget(decision_title)
 
-        technical_hint = QLabel(
-            "Cards alimentados diretamente pelos textos humanizados da IA para o ultimo ciclo."
-        )
-        technical_hint.setObjectName("HeroHint")
-        _configure_dynamic_label(technical_hint)
-        technical_copy.addWidget(technical_hint)
-        technical_header.addLayout(technical_copy, 1)
+        self.details_final_action = QLabel("Aguardando próximo ciclo...")
+        self.details_final_action.setObjectName("metricValue")
+        self.details_final_action.setProperty("sizeVariant", "body")
+        _configure_dynamic_label(self.details_final_action)
+        decision_layout.addWidget(self.details_final_action)
 
-        self.details_prev_button = QPushButton("Anterior")
-        self.details_prev_button.setObjectName("SecondaryButton")
-        self.details_prev_button.clicked.connect(self._show_previous_detail_card)
-        technical_header.addWidget(self.details_prev_button, 0, Qt.AlignRight)
+        self.details_decision_reason = QLabel("--")
+        self.details_decision_reason.setObjectName("HeroHint")
+        _configure_dynamic_label(self.details_decision_reason)
+        decision_layout.addWidget(self.details_decision_reason)
 
-        self.details_carousel_label = QLabel("1/1")
-        self.details_carousel_label.setObjectName("metaLabel")
-        technical_header.addWidget(self.details_carousel_label, 0, Qt.AlignRight)
+        content_layout.addWidget(decision_card)
 
-        self.details_next_button = QPushButton("Proximo")
-        self.details_next_button.setObjectName("SecondaryButton")
-        self.details_next_button.clicked.connect(self._show_next_detail_card)
-        technical_header.addWidget(self.details_next_button, 0, Qt.AlignRight)
-        content_layout.addLayout(technical_header)
+        votes_card = QFrame()
+        votes_card.setObjectName("PositionCard")
+        votes_layout = QVBoxLayout(votes_card)
+        votes_layout.setContentsMargins(18, 16, 18, 16)
+        votes_layout.setSpacing(12)
 
-        self.details_technical_stack = QStackedWidget()
-        self.details_technical_stack.currentChanged.connect(self._update_details_carousel_navigation)
-        content_layout.addWidget(self.details_technical_stack)
+        votes_header = QHBoxLayout()
+        votes_title = QLabel("Votos Individuais dos Modelos")
+        votes_title.setObjectName("fieldLabel")
+        votes_header.addWidget(votes_title)
 
-        self.indicators_card = DetailFieldCard("Leitura do Mercado")
-        self.intelligence_card = DetailFieldCard("Interpretacao do Modelo")
-        self.filters_card = DetailFieldCard("Diagnostico dos Filtros")
+        self.details_vote_timestamp = QLabel("--:--:--")
+        self.details_vote_timestamp.setObjectName("subtleText")
+        votes_header.addWidget(self.details_vote_timestamp, 0, Qt.AlignRight)
+        votes_layout.addLayout(votes_header)
 
-        self.details_technical_cards = [
-            self.indicators_card,
-            self.intelligence_card,
-            self.filters_card,
-        ]
-        self._details_carousel_signature: tuple[int, int] | None = None
-        self._rebuild_details_carousel(items_per_page=3, columns=3)
+        self.details_votes_container = QVBoxLayout()
+        self.details_votes_container.setSpacing(8)
+        votes_layout.addLayout(self.details_votes_container)
 
-        def build_detail_section(title: str, *, min_height: int = 122) -> tuple[QFrame, QLabel, QLabel]:
-            card = QFrame()
-            card.setObjectName("PositionCard")
-            card.setMinimumHeight(min_height)
-            section_layout = QVBoxLayout(card)
-            section_layout.setContentsMargins(18, 16, 18, 16)
-            section_layout.setSpacing(8)
-
-            title_label = QLabel(title)
-            title_label.setObjectName("fieldLabel")
-            section_layout.addWidget(title_label)
-
-            value_label = QLabel("--")
-            value_label.setObjectName("metricValue")
-            value_label.setProperty("sizeVariant", "body")
-            _configure_dynamic_label(value_label)
-            section_layout.addWidget(value_label)
-
-            note_label = QLabel("")
-            note_label.setObjectName("HeroHint")
-            _configure_dynamic_label(note_label)
-            note_label.hide()
-            section_layout.addWidget(note_label)
-
-            return card, value_label, note_label
-
-        self.details_sections_grid = QGridLayout()
-        self.details_sections_grid.setContentsMargins(0, 0, 0, 0)
-        self.details_sections_grid.setHorizontalSpacing(14)
-        self.details_sections_grid.setVerticalSpacing(14)
-
-        self.details_context_card, self.details_context_value, self.details_context_note = build_detail_section(
-            "Contexto da decisão"
-        )
-        self.details_trade_card, self.details_trade_value, self.details_trade_note = build_detail_section(
-            "Última operação"
-        )
-        self.details_skip_card, self.details_skip_value, self.details_skip_note = build_detail_section(
-            "Última não entrada"
-        )
-        self.details_features_card, self.details_features_value, self.details_features_note = build_detail_section(
-            "Leitura das features",
-            min_height=128,
-        )
-        self.details_section_cards = [
-            self.details_context_card,
-            self.details_trade_card,
-            self.details_skip_card,
-            self.details_features_card,
-        ]
-        content_layout.addLayout(self.details_sections_grid)
+        content_layout.addWidget(votes_card)
+        content_layout.addStretch(1)
 
         self.details_scroll.setWidget(details_host)
         layout.addWidget(self.details_scroll, 1)
@@ -1358,8 +1309,8 @@ class TraderBotLauncher(QMainWindow):
         wrapper = QFrame()
         wrapper.setObjectName("LevelBox")
         inner = QVBoxLayout(wrapper)
-        inner.setContentsMargins(14, 12, 14, 12)
-        inner.setSpacing(6)
+        inner.setContentsMargins(12, 10, 12, 10)
+        inner.setSpacing(4)
 
         label = QLabel(title)
         label.setObjectName("MetricLabel")
@@ -1428,20 +1379,14 @@ class TraderBotLauncher(QMainWindow):
         else:
             metrics_columns = 1
 
-        detail_overview_columns = 2 if dashboard_width >= 980 else 1
         detail_columns = 4 if dashboard_width >= 1280 else 2 if dashboard_width >= 760 else 1
-        detail_section_columns = 2 if dashboard_width >= 760 else 1
         level_columns = 3 if dashboard_width >= 980 else 1
-        detail_carousel_items = 3 if dashboard_width >= 1340 else 2 if dashboard_width >= 940 else 1
-        detail_carousel_columns = min(detail_carousel_items, 3)
 
         self._relayout_grid_items(self.dashboard_metrics_grid, self.dashboard_metric_tiles, metrics_columns)
-        if hasattr(self, "details_overview_grid"):
-            self._relayout_grid_items(self.details_overview_grid, self.details_overview_cards, detail_overview_columns)
-        self._relayout_grid_items(self.details_metrics_grid, self.details_metric_tiles, detail_columns)
-        if hasattr(self, "details_technical_stack"):
-            self._rebuild_details_carousel(detail_carousel_items, detail_carousel_columns)
-        self._relayout_grid_items(self.details_sections_grid, self.details_section_cards, detail_section_columns)
+
+        if hasattr(self, "details_metrics_grid"):
+            self._relayout_grid_items(self.details_metrics_grid, self.details_metric_tiles, detail_columns)
+
         self._relayout_grid_items(self.levels_grid, self.level_boxes, level_columns)
         if hasattr(self, "notifications_layout"):
             self._trim_notifications()
@@ -1996,6 +1941,13 @@ class TraderBotLauncher(QMainWindow):
         self._refresh_dashboard()
         key_name = self.cfg.launcher.openai_api_key_env or "OPENAI_API_KEY"
         has_key = _has_env_value(key_name)
+        openai_status = (
+            "desativada"
+            if not self.cfg.launcher.openai_enabled
+            else "pronta"
+            if has_key
+            else "sem chave"
+        )
         self._push_event(
             self._new_event(
                 source="launcher",
@@ -2007,7 +1959,7 @@ class TraderBotLauncher(QMainWindow):
                     f"regime dist>={self.cfg.environment.regime_min_abs_dist_ema_240:.3f}, "
                     f"regime vol>={self.cfg.environment.regime_min_vol_regime_z:.2f}, "
                     f"auto check {int(self.cfg.launcher.auto_check_interval_seconds)}s e OpenAI "
-                    f"{'pronta' if has_key else 'sem chave'}."
+                    f"{openai_status}."
                 ),
                 event_code="system.settings_saved",
             )
@@ -2301,6 +2253,7 @@ class TraderBotLauncher(QMainWindow):
 
     def _push_event(self, event: LauncherEvent, *, prebuilt: HumanizedEvent | None = None) -> None:
         summary = prebuilt or self.log_translator.local.summarize(event)
+        self._apply_humanized_cycle_details(summary)
         if summary.relevant:
             widget, is_new = self._upsert_notification(summary)
             if is_new:
@@ -2528,6 +2481,7 @@ class TraderBotLauncher(QMainWindow):
             "decision_mode": payload.get("decision_mode"),
             "vote_bucket": payload.get("vote_bucket"),
             "votes": payload.get("votes"),
+            "model_votes": payload.get("model_votes"),
             "raw_actions": payload.get("raw_actions"),
             "reason": payload.get("decision_reason"),
             "final_action": final_action,
@@ -2708,81 +2662,104 @@ class TraderBotLauncher(QMainWindow):
         self.sl_value.setText(self.state.stop_loss_label)
         _fit_label_height(self.sl_value)
 
-        self.connection_tile.update_tile(_display_value(self.state.connection_label, "offline"), tone="default")
+        # --- ATUALIZAÇÃO DA ABA DE DETALHES ---
+
         self.heartbeat_tile.update_tile(_display_value(self.state.last_valid_check_label, "--"), tone="default")
         self.operations_today_tile.update_tile(_display_value(self.state.operations_today_label, "0"), tone="default")
         self.blocked_today_tile.update_tile(_display_value(self.state.blocked_today_label, "0"), tone="default")
 
-        def set_detail_block(value_label: QLabel, value_text: str, note_label: QLabel, note_text: str | None = None) -> None:
-            value_label.setText(value_text)
-            _fit_label_height(value_label)
-            if note_text:
-                note_label.setText(note_text)
-                _fit_label_height(note_label)
-                note_label.show()
-            else:
-                note_label.hide()
+        dec_snap = self.state.decision_snapshot if isinstance(self.state.decision_snapshot, dict) else {}
+        if dec_snap:
+            final_action = dec_snap.get("final_action", 0.0)
+            direction = str(dec_snap.get("vote_bucket", "--")).upper()
+            reason = str(dec_snap.get("reason", self.state.last_decision))
 
-        current_reason = self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else dashboard_summary
-        trade_fallback = self.state.last_trade_reason_label
-        if trade_fallback.startswith("Nenhuma "):
-            trade_fallback = HUMANIZED_EXECUTION_PLACEHOLDER
-        filters_fallback = self.state.last_skip_reason_label
-        if filters_fallback == "Nenhum bloqueio recente.":
-            filters_fallback = HUMANIZED_FILTERS_PLACEHOLDER
-        detail_simple_summary = _display_value(self.state.humanized_simple_summary, self.state.last_decision)
-        detail_execution_summary = _display_value(self.state.humanized_execution_summary, current_reason)
-        detail_market_state = _display_value(self.state.humanized_market_state, HUMANIZED_MARKET_PLACEHOLDER)
-        detail_model_interpretation = _display_value(
-            self.state.humanized_model_interpretation,
-            HUMANIZED_MODEL_PLACEHOLDER,
-        )
-        detail_filters_diagnostic = _display_value(
-            self.state.humanized_filters_diagnostic,
-            filters_fallback,
-        )
-        detail_trade_summary = _display_value(self.state.humanized_execution_summary, trade_fallback)
+            self.details_final_action.setText(
+                f"Direção: {direction} | Sinal de Força: {_strength(final_action)}"
+            )
+            self.details_decision_reason.setText(f"Diagnóstico: {reason}")
+        else:
+            self.details_final_action.setText("Aguardando próximo ciclo...")
+            self.details_decision_reason.setText("Nenhum dado recebido ainda.")
 
-        self.details_decision_label.setText(detail_simple_summary)
-        _fit_label_height(self.details_decision_label)
-        self.details_decision_reason_label.setText(detail_execution_summary)
-        _fit_label_height(self.details_decision_reason_label)
-        self.details_decision_meta_label.setText(
-            f"Sinal {self.state.signal_label} | Direcao {self.state.direction_label} | Regime {self.state.regime_label} | Posicao {self.state.position_label}"
-        )
-        _fit_label_height(self.details_decision_meta_label)
+        _fit_label_height(self.details_final_action)
+        _fit_label_height(self.details_decision_reason)
 
-        self.indicators_card.set_summary(detail_market_state)
-        self.indicators_card.set_note(None)
-        self.intelligence_card.set_summary(detail_model_interpretation)
-        self.intelligence_card.set_note(None)
-        self.filters_card.set_summary(detail_filters_diagnostic)
-        self.filters_card.set_note(None)
+        self.details_vote_timestamp.setText(f"Atualizado às: {self.state.last_update_label}")
 
-        set_detail_block(
-            self.details_context_value,
-            detail_market_state,
-            self.details_context_note,
-            f"Preco de referencia {self.state.reference_price} | Risco {self.state.risk_label}",
-        )
-        set_detail_block(
-            self.details_trade_value,
-            detail_trade_summary,
-            self.details_trade_note,
-            f"Posicao atual {self.state.position_label} | Tamanho {self.state.position_size_label}",
-        )
-        set_detail_block(
-            self.details_skip_value,
-            detail_filters_diagnostic,
-            self.details_skip_note,
-            f"Bloqueio atual: {self.state.blocker_label}",
-        )
-        set_detail_block(
-            self.details_features_value,
-            detail_model_interpretation,
-            self.details_features_note,
-            f"Entrada {self.state.entry_label} | TP {self.state.take_profit_label} | SL {self.state.stop_loss_label}",
-        )
+        while self.details_votes_container.count():
+            item = self.details_votes_container.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+            elif item.layout():
+                self._detach_layout_items(item.layout())
+
+        votes_data = dec_snap.get("model_votes") or dec_snap.get("raw_actions") or {}
+        fallback_votes = dec_snap.get("votes") or {}
+        if (
+            not votes_data
+            and isinstance(fallback_votes, dict)
+            and any(str(key).lower() not in {"buy", "hold", "sell"} for key in fallback_votes)
+        ):
+            votes_data = fallback_votes
+
+        if isinstance(votes_data, str):
+            try:
+                votes_data = json.loads(votes_data)
+            except Exception:
+                votes_data = {}
+
+        vote_items: list[tuple[str, Any]] = []
+        if isinstance(votes_data, dict) and votes_data:
+            vote_items = [(str(model_name), vote_value) for model_name, vote_value in votes_data.items()]
+        elif isinstance(votes_data, list) and votes_data:
+            configured_model_names = self.cfg.execution.selected_model_names or self.cfg.execution.ensemble_model_names
+            vote_items = [
+                (
+                    str(configured_model_names[index]) if index < len(configured_model_names) else f"model_{index + 1}",
+                    vote_value,
+                )
+                for index, vote_value in enumerate(votes_data)
+            ]
+
+        if dec_snap and vote_items:
+            for model_name, vote_value in vote_items:
+                row = QHBoxLayout()
+
+                clean_name = str(model_name).replace("_", " ").upper()
+                m_label = QLabel(clean_name)
+                m_label.setObjectName("subtleText")
+
+                val_float = _safe_float(vote_value)
+                if val_float is not None:
+                    tamanho_voto = f"{val_float * 100.0:+.1f}"
+
+                    if val_float >= 0.05:
+                        v_text = f"COMPRA ({tamanho_voto})"
+                        tone = "success"
+                    elif val_float <= -0.05:
+                        v_text = f"VENDA ({tamanho_voto})"
+                        tone = "error"
+                    else:
+                        v_text = f"HOLD ({tamanho_voto})"
+                        tone = "muted"
+                else:
+                    v_text = str(vote_value)
+                    tone = "default"
+
+                v_label = QLabel(v_text)
+                v_label.setObjectName("metricValue")
+                v_label.setProperty("sizeVariant", "body")
+                _set_widget_property(v_label, "tone", tone)
+
+                row.addWidget(m_label)
+                row.addWidget(v_label, 0, Qt.AlignRight)
+                self.details_votes_container.addLayout(row)
+        else:
+            lbl = QLabel("Aguardando registro numérico dos modelos no próximo ciclo...")
+            lbl.setObjectName("HeroHint")
+            self.details_votes_container.addWidget(lbl)
 
     def _update_navigation_state(self) -> None:
         labels = {

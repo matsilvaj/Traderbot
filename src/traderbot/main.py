@@ -1007,6 +1007,7 @@ def _build_runtime_cycle_log(
         "signal_bucket": action_bucket_label(action_bucket(final_action, hold_threshold)),
         "vote_bucket": vote_info.get("bucket"),
         "votes": vote_info.get("votes"),
+        "model_votes": vote_info.get("model_votes"),
         "raw_actions": vote_info.get("raw_actions"),
         "raw_action": vote_info.get("raw_action"),
         "tie_hold": bool(vote_info.get("tie_hold", False)),
@@ -1111,6 +1112,7 @@ def _build_runtime_cycle_log(
         "regime_dist_ema_240": filters["regime_dist_ema_240"],
         "regime_vol_regime_z": filters["regime_vol_regime_z"],
         "votes": decision["votes"],
+        "model_votes": decision["model_votes"],
         "vote_bucket": decision["vote_bucket"],
         "tie_hold": decision["tie_hold"],
         "final_action": decision["final_action"],
@@ -1215,9 +1217,20 @@ def infer_latest_action_ensemble(models, obs: np.ndarray, hold_threshold: float)
         }
 
     raw_actions = []
-    for model, obs_normalizer in models:
+    model_votes: dict[str, float] = {}
+    for index, entry in enumerate(models, start=1):
+        if isinstance(entry, (list, tuple)) and len(entry) == 3:
+            model_name, model, obs_normalizer = entry
+        else:
+            model_name = f"model_{index}"
+            model, obs_normalizer = entry
         model_obs = maybe_normalize_obs(obs, obs_normalizer)
-        raw_actions.append(infer_latest_action(model, model_obs))
+        raw_action = infer_latest_action(model, model_obs)
+        raw_actions.append(raw_action)
+        label = str(model_name or f"model_{index}")
+        if label in model_votes:
+            label = f"{label}_{index}"
+        model_votes[label] = float(raw_action)
 
     winner_bucket, counts = majority_vote_bucket(raw_actions, hold_threshold)
     if winner_bucket == 1:
@@ -1234,6 +1247,7 @@ def infer_latest_action_ensemble(models, obs: np.ndarray, hold_threshold: float)
     return final_action, {
         "mode": "ensemble",
         "raw_actions": [float(x) for x in raw_actions],
+        "model_votes": model_votes,
         "final_action": final_action,
         "bucket": action_bucket_label(winner_bucket),
         "votes": counts,
@@ -1280,23 +1294,32 @@ def run_execution_pipeline(
         vec_env.norm_reward = False
         return vec_env
 
-    if model_path:
-        path = Path(model_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Modelo não encontrado em {path}")
-        models = (RLModelManager.load(path), vecnormalize_stats_path(path))
-    elif not execution_models_available(cfg, logger):
+    def build_model_entries(model_override: str | None = None):
+        if model_override:
+            path = Path(model_override)
+            if not path.exists():
+                raise FileNotFoundError(f"Modelo não encontrado em {path}")
+            return (RLModelManager.load(path), build_obs_normalizer(vecnormalize_stats_path(path)))
+
+        if cfg.execution.ensemble_enabled:
+            named_models = load_named_execution_models(cfg, logger)
+            if named_models:
+                return [
+                    (name, model, build_obs_normalizer(stats_path))
+                    for name, (model, stats_path) in named_models
+                ]
+
+        models = load_execution_models(cfg, logger)
+        if isinstance(models, list):
+            return [(model, build_obs_normalizer(stats_path)) for model, stats_path in models]
+
+        model, stats_path = models
+        return (model, build_obs_normalizer(stats_path))
+
+    if not model_path and not execution_models_available(cfg, logger):
         logger.info("Modelo não encontrado, treinando novo modelo...")
         _, _, _ = train_pipeline(cfg, logger)
-        models = load_execution_models(cfg, logger)
-    else:
-        models = load_execution_models(cfg, logger)
-
-    if isinstance(models, list):
-        model_entries = [(model, build_obs_normalizer(stats_path)) for model, stats_path in models]
-    else:
-        model, stats_path = models
-        model_entries = (model, build_obs_normalizer(stats_path))
+    model_entries = build_model_entries(model_path)
 
     executor = HyperliquidExecutor(
         cfg.hyperliquid,
@@ -1376,13 +1399,8 @@ def run_execution_pipeline(
                 if time.time() - last_retrain >= interval_s:
                     logger.info("Executando re-treinamento automático.")
                     _, _, _ = train_pipeline(cfg, logger)
-                    models = load_execution_models(cfg, logger)
                     fe, cols, train_df = prepare_live_inference_context(cfg, logger)
-                    if isinstance(models, list):
-                        model_entries = [(model, build_obs_normalizer(stats_path)) for model, stats_path in models]
-                    else:
-                        model, stats_path = models
-                        model_entries = (model, build_obs_normalizer(stats_path))
+                    model_entries = build_model_entries()
                     executor.disconnect()
                     executor.connect()
                     last_retrain = time.time()
