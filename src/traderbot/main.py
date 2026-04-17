@@ -219,7 +219,10 @@ def _resample_ohlcv_to_timeframe(raw, timeframe: str, logger):
 def prepare_datasets(cfg: AppConfig, logger):
     source = str(cfg.data.source).lower().strip()
     if source == "csv":
-        logger.info("Carregando histórico a partir do CSV: %s", cfg.data.csv_path)
+        logger.info(
+            "Carregando CSV (%s) APENAS para inicializar normalizador do modelo PPO...",
+            cfg.data.csv_path,
+        )
         raw = CSVDataLoader(cfg.data).load()
     else:
         logger.info("Conectando à Hyperliquid para buscar histórico...")
@@ -289,8 +292,14 @@ def prepare_runtime_environment_cfg(cfg: AppConfig, logger):
         env_cfg.initial_balance = float(cfg.execution.validation_balance)
 
     if env_cfg.use_broker_constraints:
+        simulation_label = (
+            "Configuração Live/Exchange ativada"
+            if bool(cfg.execution.allow_live_trading)
+            else "Simulação Hyperliquid ativada"
+        )
         logger.info(
-            "Simulação Hyperliquid ativada | balance=%.2f | volume_min=%.4f | step=%.4f | contract_size=%.4f | max_risk=%.2f%% | hold_threshold=%.2f",
+            "%s | balance=%.2f | volume_min=%.4f | step=%.4f | contract_size=%.4f | max_risk=%.2f%% | hold_threshold=%.2f",
+            simulation_label,
             env_cfg.initial_balance,
             env_cfg.broker_volume_min,
             env_cfg.broker_volume_step,

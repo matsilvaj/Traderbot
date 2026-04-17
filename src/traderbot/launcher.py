@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -76,6 +76,52 @@ def _display_value(value: Any, fallback: str) -> str:
     return text
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_number(
+    value: Any,
+    digits: int = 2,
+    *,
+    signed: bool = False,
+    suffix: str = "",
+    fallback: str = "--",
+) -> str:
+    number = _safe_float(value)
+    if number is None:
+        return fallback
+    sign = "+" if signed and number > 0 else ""
+    return f"{sign}{number:,.{digits}f}{suffix}"
+
+
+def _optional_price(value: Any, fallback: str = "--") -> str:
+    number = _safe_float(value)
+    if number is None:
+        return fallback
+    return f"${number:,.2f}"
+
+
+def _optional_pct(value: Any, digits: int = 2, *, signed: bool = True, fallback: str = "--") -> str:
+    number = _safe_float(value)
+    if number is None:
+        return fallback
+    sign = "+" if signed and number > 0 else ""
+    return f"{sign}{number * 100.0:.{digits}f}%"
+
+
+def _optional_ratio(value: Any, digits: int = 2, fallback: str = "--") -> str:
+    number = _safe_float(value)
+    if number is None:
+        return fallback
+    return f"{number:.{digits}f}x"
+
+
 def _json_marker(line: str, marker: str) -> dict[str, Any] | None:
     if marker not in line:
         return None
@@ -128,7 +174,7 @@ class DashboardState:
     risk_label: str = "--"
     balance_label: str = "--"
     blocker_label: str = "Sem bloqueio"
-    last_decision: str = "Sem decisao no momento."
+    last_decision: str = "Sem decisão no momento."
     last_update_label: str = "--"
     last_valid_check_label: str = "--"
     network_label: str = "TESTNET"
@@ -138,7 +184,7 @@ class DashboardState:
     execution_mode_label: str = "exchange"
     operations_today_label: str = "0"
     blocked_today_label: str = "0"
-    last_trade_reason_label: str = "Nenhuma operacao hoje."
+    last_trade_reason_label: str = "Nenhuma operação hoje."
     last_skip_reason_label: str = "Nenhum bloqueio recente."
     context_summary_label: str = "Sem contexto recente."
     feature_summary_label: str = "Sem leitura recente das features."
@@ -151,6 +197,10 @@ class DashboardState:
     pnl_label: str = "--"
     pnl_style: str = "muted"
     last_raw_detail: str = ""
+    market_snapshot: dict[str, Any] = field(default_factory=dict)
+    feature_snapshot: dict[str, Any] = field(default_factory=dict)
+    decision_snapshot: dict[str, Any] = field(default_factory=dict)
+    filter_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -255,6 +305,76 @@ class MetricTile(QFrame):
         _set_widget_property(self.value, "tone", tone)
         if note:
             self.note.setText(note)
+            _fit_label_height(self.note)
+            self.note.show()
+        else:
+            self.note.hide()
+
+
+class DetailFieldCard(QFrame):
+    def __init__(self, title: str, *, min_height: int = 224):
+        super().__init__()
+        self.setObjectName("PositionCard")
+        self.setMinimumHeight(min_height)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("fieldLabel")
+        layout.addWidget(title_label)
+
+        self.summary = QLabel("--")
+        self.summary.setObjectName("metricValue")
+        self.summary.setProperty("sizeVariant", "body")
+        _configure_dynamic_label(self.summary)
+        layout.addWidget(self.summary)
+
+        self.fields_grid = QGridLayout()
+        self.fields_grid.setContentsMargins(0, 0, 0, 0)
+        self.fields_grid.setHorizontalSpacing(12)
+        self.fields_grid.setVerticalSpacing(8)
+        self.fields_grid.setColumnStretch(0, 1)
+        self.fields_grid.setColumnStretch(1, 2)
+        layout.addLayout(self.fields_grid)
+
+        self.note = QLabel("")
+        self.note.setObjectName("HeroHint")
+        _configure_dynamic_label(self.note)
+        self.note.hide()
+        layout.addWidget(self.note)
+
+        self._field_values: dict[str, QLabel] = {}
+
+    def add_field(self, key: str, label: str) -> None:
+        row = len(self._field_values)
+        label_widget = QLabel(label)
+        label_widget.setObjectName("MetricLabel")
+        label_widget.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.fields_grid.addWidget(label_widget, row, 0, Qt.AlignTop)
+
+        value_widget = QLabel("--")
+        value_widget.setObjectName("metricValue")
+        value_widget.setProperty("sizeVariant", "body")
+        _configure_dynamic_label(value_widget)
+        self.fields_grid.addWidget(value_widget, row, 1)
+        self._field_values[key] = value_widget
+
+    def set_summary(self, text: str) -> None:
+        self.summary.setText(text)
+        _fit_label_height(self.summary)
+
+    def set_field(self, key: str, text: str) -> None:
+        value_widget = self._field_values.get(key)
+        if value_widget is None:
+            return
+        value_widget.setText(text)
+        _fit_label_height(value_widget)
+
+    def set_note(self, text: str | None) -> None:
+        if text:
+            self.note.setText(text)
             _fit_label_height(self.note)
             self.note.show()
         else:
@@ -829,9 +949,9 @@ class TraderBotLauncher(QMainWindow):
 
         self.signal_tile = MetricTile("Sinal", compact=True, min_height=118)
         self.reason_tile = MetricTile("Motivo", wrap_value=True, min_height=144)
-        self.price_tile = MetricTile("Preco de referencia", compact=True, min_height=118)
+        self.price_tile = MetricTile("Preço de referência", compact=True, min_height=118)
         self.risk_tile = MetricTile("Risco efetivo", compact=True, min_height=118)
-        self.position_tile = MetricTile("Posicao atual", compact=True, min_height=118)
+        self.position_tile = MetricTile("Posição atual", compact=True, min_height=118)
         self.pnl_tile = MetricTile("PnL aberto", compact=True, min_height=118)
         self.dashboard_metric_tiles = [
             self.signal_tile,
@@ -911,43 +1031,6 @@ class TraderBotLauncher(QMainWindow):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
 
-        sticky_row = QHBoxLayout()
-        sticky_row.setContentsMargins(0, 0, 0, 0)
-        sticky_row.setSpacing(0)
-        sticky_row.addStretch(1)
-
-        self.details_state_card = QFrame()
-        self.details_state_card.setObjectName("PositionCard")
-        self.details_state_card.setMinimumHeight(96)
-        self.details_state_card.setMaximumWidth(920)
-        state_layout = QVBoxLayout(self.details_state_card)
-        state_layout.setContentsMargins(20, 16, 20, 16)
-        state_layout.setSpacing(6)
-
-        state_title = QLabel("Estado atual")
-        state_title.setObjectName("fieldLabel")
-        state_title.setAlignment(Qt.AlignCenter)
-        state_layout.addWidget(state_title)
-
-        self.details_state_value = QLabel("Sem sinal ativo")
-        self.details_state_value.setObjectName("PositionStatus")
-        self.details_state_value.setAlignment(Qt.AlignCenter)
-        _configure_dynamic_label(self.details_state_value)
-        state_layout.addWidget(self.details_state_value)
-
-        self.details_state_note = QLabel("Conexao offline • ultimo check --")
-        self.details_state_note.setObjectName("HeroHint")
-        self.details_state_note.setAlignment(Qt.AlignCenter)
-        _configure_dynamic_label(self.details_state_note)
-        state_layout.addWidget(self.details_state_note)
-        self.details_system_value = self.details_state_value
-        self.details_system_note = self.details_state_note
-
-        sticky_row.addWidget(self.details_state_card)
-        sticky_row.addStretch(1)
-        layout.addLayout(sticky_row)
-        self.details_state_card.hide()
-
         self.details_scroll = QScrollArea()
         self.details_scroll.setWidgetResizable(True)
         self.details_scroll.setFrameShape(QFrame.NoFrame)
@@ -962,18 +1045,24 @@ class TraderBotLauncher(QMainWindow):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(18)
 
+        self.details_overview_grid = QGridLayout()
+        self.details_overview_grid.setContentsMargins(0, 0, 0, 0)
+        self.details_overview_grid.setHorizontalSpacing(14)
+        self.details_overview_grid.setVerticalSpacing(14)
+        content_layout.addLayout(self.details_overview_grid)
+
         hero_card = QFrame()
         hero_card.setObjectName("PositionCard")
-        hero_card.setMinimumHeight(142)
+        hero_card.setMinimumHeight(152)
         hero_layout = QVBoxLayout(hero_card)
         hero_layout.setContentsMargins(18, 16, 18, 16)
         hero_layout.setSpacing(8)
 
-        hero_eyebrow = QLabel("Ultima decisao relevante")
+        hero_eyebrow = QLabel("Última decisão relevante")
         hero_eyebrow.setObjectName("fieldLabel")
         hero_layout.addWidget(hero_eyebrow)
 
-        self.details_decision_label = QLabel("Sem decisao no momento.")
+        self.details_decision_label = QLabel("Sem decisão no momento.")
         self.details_decision_label.setObjectName("PositionStatus")
         _configure_dynamic_label(self.details_decision_label)
         hero_layout.addWidget(self.details_decision_label)
@@ -983,21 +1072,23 @@ class TraderBotLauncher(QMainWindow):
         _configure_dynamic_label(self.details_decision_reason_label)
         hero_layout.addWidget(self.details_decision_reason_label)
 
-        self.details_decision_meta_label = QLabel("Sinal nenhum • Direcao nenhuma • Regime indefinido")
+        self.details_decision_meta_label = QLabel(
+            "Sinal nenhum • Direção nenhuma • Regime indefinido • Posição FLAT"
+        )
         self.details_decision_meta_label.setObjectName("subtleText")
         _configure_dynamic_label(self.details_decision_meta_label)
         hero_layout.addWidget(self.details_decision_meta_label)
 
-        content_layout.addWidget(hero_card)
+        self.details_overview_cards = [hero_card]
 
         self.details_metrics_grid = QGridLayout()
         self.details_metrics_grid.setContentsMargins(0, 0, 0, 0)
         self.details_metrics_grid.setHorizontalSpacing(14)
         self.details_metrics_grid.setVerticalSpacing(14)
 
-        self.connection_tile = MetricTile("Conexao", compact=True, min_height=92)
-        self.heartbeat_tile = MetricTile("Ultimo check valido", compact=True, min_height=92)
-        self.operations_today_tile = MetricTile("Operacoes hoje", compact=True, min_height=92)
+        self.connection_tile = MetricTile("Conexão", compact=True, min_height=92)
+        self.heartbeat_tile = MetricTile("Último check válido", compact=True, min_height=92)
+        self.operations_today_tile = MetricTile("Operações hoje", compact=True, min_height=92)
         self.blocked_today_tile = MetricTile("Bloqueios hoje", compact=True, min_height=92)
         self.details_metric_tiles = [
             self.connection_tile,
@@ -1006,6 +1097,68 @@ class TraderBotLauncher(QMainWindow):
             self.blocked_today_tile,
         ]
         content_layout.addLayout(self.details_metrics_grid)
+
+        technical_header = QHBoxLayout()
+        technical_header.setSpacing(10)
+
+        technical_copy = QVBoxLayout()
+        technical_copy.setSpacing(4)
+        technical_title = QLabel("Analise tecnica do ultimo ciclo")
+        technical_title.setObjectName("fieldLabel")
+        technical_copy.addWidget(technical_title)
+
+        technical_hint = QLabel(
+            "Cards alimentados diretamente por market_snapshot, feature_snapshot, decision e filters do runtime."
+        )
+        technical_hint.setObjectName("HeroHint")
+        _configure_dynamic_label(technical_hint)
+        technical_copy.addWidget(technical_hint)
+        technical_header.addLayout(technical_copy, 1)
+
+        self.details_prev_button = QPushButton("Anterior")
+        self.details_prev_button.setObjectName("SecondaryButton")
+        self.details_prev_button.clicked.connect(self._show_previous_detail_card)
+        technical_header.addWidget(self.details_prev_button, 0, Qt.AlignRight)
+
+        self.details_carousel_label = QLabel("1/1")
+        self.details_carousel_label.setObjectName("metaLabel")
+        technical_header.addWidget(self.details_carousel_label, 0, Qt.AlignRight)
+
+        self.details_next_button = QPushButton("Proximo")
+        self.details_next_button.setObjectName("SecondaryButton")
+        self.details_next_button.clicked.connect(self._show_next_detail_card)
+        technical_header.addWidget(self.details_next_button, 0, Qt.AlignRight)
+        content_layout.addLayout(technical_header)
+
+        self.details_technical_stack = QStackedWidget()
+        self.details_technical_stack.currentChanged.connect(self._update_details_carousel_navigation)
+        content_layout.addWidget(self.details_technical_stack)
+
+        self.indicators_card = DetailFieldCard("Card de Indicadores")
+        self.indicators_card.add_field("rsi", "RSI")
+        self.indicators_card.add_field("dist_ema_240", "Distancia EMA 240")
+        self.indicators_card.add_field("vol_regime_z", "Volatilidade (Z-Score)")
+        self.indicators_card.add_field("volume_ratio_20", "Volume relativo")
+
+        self.intelligence_card = DetailFieldCard("Card de Inteligencia")
+        self.intelligence_card.add_field("interpretation", "Interpretacao do Modelo")
+        self.intelligence_card.add_field("vote_bucket", "Bucket vencedor")
+        self.intelligence_card.add_field("votes", "Distribuicao dos votos")
+        self.intelligence_card.add_field("final_action", "Acao final")
+
+        self.filters_card = DetailFieldCard("Card de Filtros")
+        self.filters_card.add_field("regime_status", "Status do regime")
+        self.filters_card.add_field("regime_diagnostic", "Diagnostico")
+        self.filters_card.add_field("dist_check", "Checagem EMA 240")
+        self.filters_card.add_field("vol_check", "Checagem volatilidade")
+
+        self.details_technical_cards = [
+            self.indicators_card,
+            self.intelligence_card,
+            self.filters_card,
+        ]
+        self._details_carousel_signature: tuple[int, int] | None = None
+        self._rebuild_details_carousel(items_per_page=3, columns=3)
 
         def build_detail_section(title: str, *, min_height: int = 122) -> tuple[QFrame, QLabel, QLabel]:
             card = QFrame()
@@ -1039,13 +1192,13 @@ class TraderBotLauncher(QMainWindow):
         self.details_sections_grid.setVerticalSpacing(14)
 
         self.details_context_card, self.details_context_value, self.details_context_note = build_detail_section(
-            "Contexto da decisao"
+            "Contexto da decisão"
         )
         self.details_trade_card, self.details_trade_value, self.details_trade_note = build_detail_section(
-            "Ultima operacao"
+            "Última operação"
         )
         self.details_skip_card, self.details_skip_value, self.details_skip_note = build_detail_section(
-            "Nao entrada"
+            "Última não entrada"
         )
         self.details_features_card, self.details_features_value, self.details_features_note = build_detail_section(
             "Leitura das features",
@@ -1061,144 +1214,6 @@ class TraderBotLauncher(QMainWindow):
 
         self.details_scroll.setWidget(details_host)
         layout.addWidget(self.details_scroll, 1)
-
-        return tab
-
-    def _build_details_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        self.details_overview_grid = QGridLayout()
-        self.details_overview_grid.setContentsMargins(0, 0, 0, 0)
-        self.details_overview_grid.setHorizontalSpacing(12)
-        self.details_overview_grid.setVerticalSpacing(12)
-
-        hero_card = QFrame()
-        hero_card.setObjectName("PositionCard")
-        hero_card.setMinimumHeight(130)
-        hero_layout = QVBoxLayout(hero_card)
-        hero_layout.setContentsMargins(16, 14, 16, 14)
-        hero_layout.setSpacing(6)
-
-        hero_eyebrow = QLabel("Ultima decisao relevante")
-        hero_eyebrow.setObjectName("fieldLabel")
-        hero_layout.addWidget(hero_eyebrow)
-
-        self.details_decision_label = QLabel("Sem decisao no momento.")
-        self.details_decision_label.setObjectName("PositionStatus")
-        _configure_dynamic_label(self.details_decision_label)
-        hero_layout.addWidget(self.details_decision_label)
-
-        self.details_decision_reason_label = QLabel("Sem contexto recente.")
-        self.details_decision_reason_label.setObjectName("HeroHint")
-        _configure_dynamic_label(self.details_decision_reason_label)
-        hero_layout.addWidget(self.details_decision_reason_label)
-
-        self.details_decision_meta_label = QLabel("Sinal nenhum | Direcao nenhuma | Regime indefinido")
-        self.details_decision_meta_label.setObjectName("subtleText")
-        _configure_dynamic_label(self.details_decision_meta_label)
-        hero_layout.addWidget(self.details_decision_meta_label)
-
-        self.details_state_card = QFrame()
-        self.details_state_card.setObjectName("PositionCard")
-        self.details_state_card.setMinimumHeight(130)
-        state_layout = QVBoxLayout(self.details_state_card)
-        state_layout.setContentsMargins(16, 14, 16, 14)
-        state_layout.setSpacing(6)
-
-        state_title = QLabel("Estado atual")
-        state_title.setObjectName("fieldLabel")
-        state_title.setAlignment(Qt.AlignCenter)
-        state_layout.addWidget(state_title)
-
-        self.details_state_value = QLabel("Sem sinal ativo")
-        self.details_state_value.setObjectName("PositionStatus")
-        self.details_state_value.setAlignment(Qt.AlignCenter)
-        _configure_dynamic_label(self.details_state_value)
-        state_layout.addWidget(self.details_state_value)
-
-        self.details_state_note = QLabel("Conexao offline | ultimo check --")
-        self.details_state_note.setObjectName("HeroHint")
-        self.details_state_note.setAlignment(Qt.AlignCenter)
-        _configure_dynamic_label(self.details_state_note)
-        state_layout.addWidget(self.details_state_note)
-
-        self.details_system_value = self.details_state_value
-        self.details_system_note = self.details_state_note
-
-        self.details_overview_cards = [hero_card, self.details_state_card]
-        layout.addLayout(self.details_overview_grid)
-
-        self.details_metrics_grid = QGridLayout()
-        self.details_metrics_grid.setContentsMargins(0, 0, 0, 0)
-        self.details_metrics_grid.setHorizontalSpacing(12)
-        self.details_metrics_grid.setVerticalSpacing(12)
-
-        self.connection_tile = MetricTile("Conexao", compact=True, min_height=84)
-        self.heartbeat_tile = MetricTile("Ultimo check valido", compact=True, min_height=84)
-        self.operations_today_tile = MetricTile("Operacoes hoje", compact=True, min_height=84)
-        self.blocked_today_tile = MetricTile("Bloqueios hoje", compact=True, min_height=84)
-        self.details_metric_tiles = [
-            self.connection_tile,
-            self.heartbeat_tile,
-            self.operations_today_tile,
-            self.blocked_today_tile,
-        ]
-        layout.addLayout(self.details_metrics_grid)
-
-        def build_detail_section(title: str, *, min_height: int = 114) -> tuple[QFrame, QLabel, QLabel]:
-            card = QFrame()
-            card.setObjectName("PositionCard")
-            card.setMinimumHeight(min_height)
-            section_layout = QVBoxLayout(card)
-            section_layout.setContentsMargins(16, 14, 16, 14)
-            section_layout.setSpacing(6)
-
-            title_label = QLabel(title)
-            title_label.setObjectName("fieldLabel")
-            section_layout.addWidget(title_label)
-
-            value_label = QLabel("--")
-            value_label.setObjectName("metricValue")
-            value_label.setProperty("sizeVariant", "body")
-            _configure_dynamic_label(value_label)
-            section_layout.addWidget(value_label)
-
-            note_label = QLabel("")
-            note_label.setObjectName("HeroHint")
-            _configure_dynamic_label(note_label)
-            note_label.hide()
-            section_layout.addWidget(note_label)
-
-            return card, value_label, note_label
-
-        self.details_sections_grid = QGridLayout()
-        self.details_sections_grid.setContentsMargins(0, 0, 0, 0)
-        self.details_sections_grid.setHorizontalSpacing(12)
-        self.details_sections_grid.setVerticalSpacing(12)
-
-        self.details_context_card, self.details_context_value, self.details_context_note = build_detail_section(
-            "Contexto da decisao"
-        )
-        self.details_trade_card, self.details_trade_value, self.details_trade_note = build_detail_section(
-            "Ultima operacao"
-        )
-        self.details_skip_card, self.details_skip_value, self.details_skip_note = build_detail_section(
-            "Nao entrada"
-        )
-        self.details_features_card, self.details_features_value, self.details_features_note = build_detail_section(
-            "Leitura das features",
-            min_height=118,
-        )
-        self.details_section_cards = [
-            self.details_context_card,
-            self.details_trade_card,
-            self.details_skip_card,
-            self.details_features_card,
-        ]
-        layout.addLayout(self.details_sections_grid, 1)
 
         return tab
 
@@ -1277,6 +1292,16 @@ class TraderBotLauncher(QMainWindow):
             if widget is not None:
                 widget.setParent(None)
 
+    def _detach_layout_items(self, layout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            child_layout = item.layout()
+            if child_layout is not None:
+                self._detach_layout_items(child_layout)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+
     def _relayout_grid_items(self, layout: QGridLayout, widgets: list[QWidget], columns: int) -> None:
         columns = max(1, columns)
         self._clear_layout(layout)
@@ -1308,15 +1333,86 @@ class TraderBotLauncher(QMainWindow):
         detail_columns = 4 if dashboard_width >= 1280 else 2 if dashboard_width >= 760 else 1
         detail_section_columns = 2 if dashboard_width >= 760 else 1
         level_columns = 3 if dashboard_width >= 980 else 1
+        detail_carousel_items = 3 if dashboard_width >= 1340 else 2 if dashboard_width >= 940 else 1
+        detail_carousel_columns = min(detail_carousel_items, 3)
 
         self._relayout_grid_items(self.dashboard_metrics_grid, self.dashboard_metric_tiles, metrics_columns)
         if hasattr(self, "details_overview_grid"):
             self._relayout_grid_items(self.details_overview_grid, self.details_overview_cards, detail_overview_columns)
         self._relayout_grid_items(self.details_metrics_grid, self.details_metric_tiles, detail_columns)
+        if hasattr(self, "details_technical_stack"):
+            self._rebuild_details_carousel(detail_carousel_items, detail_carousel_columns)
         self._relayout_grid_items(self.details_sections_grid, self.details_section_cards, detail_section_columns)
         self._relayout_grid_items(self.levels_grid, self.level_boxes, level_columns)
         if hasattr(self, "notifications_layout"):
             self._trim_notifications()
+
+    def _rebuild_details_carousel(self, items_per_page: int, columns: int) -> None:
+        cards = getattr(self, "details_technical_cards", [])
+        if not hasattr(self, "details_technical_stack") or not cards:
+            return
+
+        signature = (max(1, items_per_page), max(1, columns))
+        if self._details_carousel_signature == signature and self.details_technical_stack.count():
+            self._update_details_carousel_navigation()
+            return
+
+        current_index = max(self.details_technical_stack.currentIndex(), 0)
+        while self.details_technical_stack.count():
+            page = self.details_technical_stack.widget(0)
+            page_layout = page.layout()
+            if page_layout is not None:
+                self._detach_layout_items(page_layout)
+            self.details_technical_stack.removeWidget(page)
+            page.deleteLater()
+
+        for start in range(0, len(cards), signature[0]):
+            chunk = cards[start : start + signature[0]]
+            page = QWidget()
+            page_layout = QGridLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setHorizontalSpacing(14)
+            page_layout.setVerticalSpacing(14)
+            for index, card in enumerate(chunk):
+                row = index // signature[1]
+                column = index % signature[1]
+                page_layout.addWidget(card, row, column)
+            for column in range(signature[1]):
+                page_layout.setColumnStretch(column, 1)
+            self.details_technical_stack.addWidget(page)
+
+        total_pages = self.details_technical_stack.count()
+        if total_pages:
+            self.details_technical_stack.setCurrentIndex(min(current_index, total_pages - 1))
+        self._details_carousel_signature = signature
+        self._update_details_carousel_navigation()
+
+    def _show_previous_detail_card(self) -> None:
+        if not hasattr(self, "details_technical_stack"):
+            return
+        current_index = self.details_technical_stack.currentIndex()
+        if current_index > 0:
+            self.details_technical_stack.setCurrentIndex(current_index - 1)
+
+    def _show_next_detail_card(self) -> None:
+        if not hasattr(self, "details_technical_stack"):
+            return
+        current_index = self.details_technical_stack.currentIndex()
+        if current_index < self.details_technical_stack.count() - 1:
+            self.details_technical_stack.setCurrentIndex(current_index + 1)
+
+    def _update_details_carousel_navigation(self) -> None:
+        if not hasattr(self, "details_technical_stack"):
+            return
+        total_pages = self.details_technical_stack.count()
+        current_page = self.details_technical_stack.currentIndex() + 1 if total_pages else 0
+        multi_page = total_pages > 1
+        self.details_prev_button.setVisible(multi_page)
+        self.details_next_button.setVisible(multi_page)
+        self.details_carousel_label.setVisible(multi_page)
+        self.details_prev_button.setEnabled(current_page > 1)
+        self.details_next_button.setEnabled(current_page < total_pages)
+        self.details_carousel_label.setText(f"{current_page}/{total_pages}" if total_pages else "--/--")
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -1394,8 +1490,8 @@ class TraderBotLauncher(QMainWindow):
             event = self._new_event(
                 source="launcher",
                 event_type="generic",
-                raw_line=f"Nao foi possivel iniciar {label}.",
-                message=f"Nao foi possivel iniciar {label}.",
+                raw_line=f"Não foi possível iniciar {label}.",
+                message=f"Não foi possível iniciar {label}.",
                 event_code="system.process_start_failed",
                 severity="error",
             )
@@ -1460,8 +1556,8 @@ class TraderBotLauncher(QMainWindow):
             event = self._new_event(
                 source="launcher",
                 event_type="generic",
-                raw_line="Existe posicao aberta. Use o kill switch antes de parar o bot.",
-                message="Existe posicao aberta. Use o kill switch antes de parar o bot.",
+                raw_line="Existe posição aberta. Use o kill switch antes de parar o bot.",
+                message="Existe posição aberta. Use o kill switch antes de parar o bot.",
                 severity="warning",
                 event_code="risk.stop_blocked_open_position",
             )
@@ -1556,7 +1652,7 @@ class TraderBotLauncher(QMainWindow):
         answer = QMessageBox.warning(
             self,
             "Confirmar kill switch",
-            "Encerrar a posicao atual e parar o bot?",
+            "Encerrar a posição atual e parar o bot?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -1671,7 +1767,7 @@ class TraderBotLauncher(QMainWindow):
         self.stats_day = today
         self.state.operations_today_label = "0"
         self.state.blocked_today_label = "0"
-        self.state.last_trade_reason_label = "Nenhuma operacao hoje."
+        self.state.last_trade_reason_label = "Nenhuma operação hoje."
         self.state.last_skip_reason_label = "Nenhum bloqueio recente."
 
     def _increment_counter_label(self, current_value: str) -> str:
@@ -1682,10 +1778,10 @@ class TraderBotLauncher(QMainWindow):
 
     def _build_context_summary(self, payload: dict[str, Any]) -> str:
         vote_bucket = str(payload.get("vote_bucket", "hold")).upper()
-        regime_text = "regime valido" if payload.get("regime_valid") else "regime invalido"
+        regime_text = "regime válido" if payload.get("regime_valid") else "regime inválido"
         signal_text = self._signal_label(float(payload.get("final_action", 0.0) or 0.0))
         force_text = _strength(payload.get("final_action", 0.0))
-        return f"{signal_text} | ensemble {vote_bucket} | {regime_text} | forca {force_text}"
+        return f"{signal_text} | ensemble {vote_bucket} | {regime_text} | força {force_text}"
 
     def _build_feature_summary(self, payload: dict[str, Any]) -> str:
         parts: list[str] = []
@@ -1754,7 +1850,7 @@ class TraderBotLauncher(QMainWindow):
         self.state.reference_price = _price(payload.get("reference_price", 0.0))
         self.state.risk_label = _pct(payload.get("dynamic_risk_pct", payload.get("risk_pct", 0.0)))
         self.state.strength_label = _strength(payload.get("final_action", 0.0))
-        self.state.regime_label = "valido" if payload.get("regime_valid") else "bloqueado"
+        self.state.regime_label = "válido" if payload.get("regime_valid") else "bloqueado"
         self.state.signal_label = self._signal_label(float(payload.get("final_action", 0.0) or 0.0))
         self.state.direction_label = str(payload.get("vote_bucket", "--")).upper()
         self.state.balance_label = _currency(payload.get("available_to_trade", 0.0))
@@ -1779,7 +1875,7 @@ class TraderBotLauncher(QMainWindow):
 
         if payload.get("error"):
             self.state.state_label = "ERRO"
-            self.state.state_message = "Execucao com erro. Revisar operacao."
+            self.state.state_message = "Execução com erro. Revisar operação."
             self.state.state_style = "error"
         elif payload.get("blocked_reason"):
             self.state.state_label = "BLOQUEADO"
@@ -1787,7 +1883,7 @@ class TraderBotLauncher(QMainWindow):
             self.state.state_style = "blocked"
         elif payload.get("position_is_open"):
             self.state.state_label = position_label
-            self.state.state_message = f"Posicao {position_label} em andamento."
+            self.state.state_message = f"Posição {position_label} em andamento."
             self.state.state_style = "long" if position_label == "LONG" else "short"
         elif self.state.signal_label == "HOLD":
             self.state.state_label = "AGUARDANDO"
@@ -1795,13 +1891,13 @@ class TraderBotLauncher(QMainWindow):
             self.state.state_style = "wait"
         else:
             self.state.state_label = "FLAT"
-            self.state.state_message = "Sem posicao aberta."
+            self.state.state_message = "Sem posição aberta."
             self.state.state_style = "flat"
 
         if payload.get("position_is_open"):
             self.state.position_status = f"{position_label} aberta no momento"
         elif payload.get("blocked_reason"):
-            self.state.position_status = "Sem posicao; entrada bloqueada"
+            self.state.position_status = "Sem posição; entrada bloqueada"
         else:
             self.state.position_status = "Sem sinal ativo"
 
@@ -1844,7 +1940,7 @@ class TraderBotLauncher(QMainWindow):
     def _apply_manual_close_payload(self, payload: dict[str, Any], *, source: str) -> None:
         if payload.get("ok"):
             self.state.position_label = "FLAT"
-            self.state.position_status = "Sem posicao aberta"
+            self.state.position_status = "Sem posição aberta"
             self.state.position_size_label = "--"
             self.state.entry_label = "--"
             self.state.take_profit_label = "--"
@@ -1852,7 +1948,7 @@ class TraderBotLauncher(QMainWindow):
             self.state.pnl_label = "--"
             self.state.pnl_style = "muted"
             self.state.state_label = "AGUARDANDO"
-            self.state.state_message = "Posicao encerrada manualmente."
+            self.state.state_message = "Posição encerrada manualmente."
             self.state.state_style = "wait"
             self.state.position_status = "Sem sinal ativo"
             self._refresh_dashboard()
@@ -2007,21 +2103,21 @@ class TraderBotLauncher(QMainWindow):
         self.details_decision_reason_label.setText(current_reason)
         _fit_label_height(self.details_decision_reason_label)
         self.details_decision_meta_label.setText(
-            f"Sinal {self.state.signal_label} • Direcao {self.state.direction_label} • Regime {self.state.regime_label}"
+            f"Sinal {self.state.signal_label} • Direção {self.state.direction_label} • Regime {self.state.regime_label} • Posição {self.state.position_label}"
         )
         _fit_label_height(self.details_decision_meta_label)
 
         set_detail_block(
             self.details_context_value,
-            f"Sinal {self.state.signal_label} • Direcao {self.state.direction_label}",
-            self.details_context_note,
             self.state.context_summary_label,
+            self.details_context_note,
+            f"Preço de referência {self.state.reference_price} • Risco {self.state.risk_label}",
         )
         set_detail_block(
             self.details_trade_value,
             self.state.last_trade_reason_label,
             self.details_trade_note,
-            f"Posicao atual {self.state.position_label} • Tamanho {self.state.position_size_label}",
+            f"Posição atual {self.state.position_label} • Tamanho {self.state.position_size_label}",
         )
         set_detail_block(
             self.details_skip_value,
@@ -2033,42 +2129,8 @@ class TraderBotLauncher(QMainWindow):
             self.details_features_value,
             self.state.feature_summary_label,
             self.details_features_note,
-            f"Preco {self.state.reference_price} • Risco {self.state.risk_label}",
+            f"Entrada {self.state.entry_label} • TP {self.state.take_profit_label} • SL {self.state.stop_loss_label}",
         )
-        set_detail_block(
-            self.details_system_value,
-            f"Conexao {self.state.connection_label} • ultimo check {self.state.last_valid_check_label}",
-            self.details_system_note,
-            f"Estado atual: {self.state.state_message} • Operacoes hoje {self.state.operations_today_label} • Bloqueios hoje {self.state.blocked_today_label}",
-        )
-        self.details_state_value.setText(self.state.state_message)
-        _fit_label_height(self.details_state_value)
-        self.details_state_note.setText(
-            f"Conexao {self.state.connection_label} • ultimo check {self.state.last_valid_check_label} • operacoes hoje {self.state.operations_today_label}"
-        )
-        _fit_label_height(self.details_state_note)
-        return
-
-        self.details_decision_label.setText(f"Ultima decisao relevante: {self.state.last_decision}")
-        _fit_label_height(self.details_decision_label)
-        self.details_context_label.setText(
-            f"Contexto de decisao: {self.state.context_summary_label}"
-        )
-        _fit_label_height(self.details_context_label)
-        self.details_signal_label.setText(
-            f"Ultima operacao: {self.state.last_trade_reason_label}"
-        )
-        _fit_label_height(self.details_signal_label)
-        self.details_block_label.setText(f"Ultima vela sem entrada: {self.state.last_skip_reason_label}")
-        _fit_label_height(self.details_block_label)
-        self.details_trade_reason_label.setText(f"Motivo do estado atual: {self.state.blocker_label if self.state.blocker_label != 'Sem bloqueio' else self.state.state_message}")
-        _fit_label_height(self.details_trade_reason_label)
-        self.details_skip_reason_label.setText(f"Leitura das features: {self.state.feature_summary_label}")
-        _fit_label_height(self.details_skip_reason_label)
-        self.details_features_label.setText(
-            f"Conexao {self.state.connection_label} • ultimo check valido {self.state.last_valid_check_label} • operacoes hoje {self.state.operations_today_label}"
-        )
-        _fit_label_height(self.details_features_label)
 
     def _apply_health_status(self, status: str, reason: str, *, emit_event: bool = False) -> None:
         previous_status = self.health_state.status
@@ -2123,6 +2185,469 @@ class TraderBotLauncher(QMainWindow):
         status, reason = self._derive_health_status(forced_reason=forced_reason)
         self._apply_health_status(status, reason, emit_event=emit_event)
 
+    def _build_context_summary(self, payload: dict[str, Any]) -> str:
+        decision_snapshot = self._decision_snapshot_from_payload(payload)
+        filter_snapshot = self._filter_snapshot_from_payload(payload)
+        final_action = decision_snapshot.get("final_action", payload.get("final_action", 0.0))
+        vote_bucket = str(decision_snapshot.get("vote_bucket", payload.get("vote_bucket", "hold"))).upper()
+        regime_text = "regime valido" if filter_snapshot.get("regime_valid_for_entry") else "regime invalido"
+        signal_text = self._signal_label(float(final_action or 0.0))
+        force_text = _strength(final_action)
+        return f"{signal_text} | ensemble {vote_bucket} | {regime_text} | forca {force_text}"
+
+    def _build_feature_summary(self, payload: dict[str, Any]) -> str:
+        feature_snapshot = self._feature_snapshot_from_payload(payload)
+        parts: list[str] = []
+        if feature_snapshot.get("dist_ema_240") not in (None, ""):
+            parts.append(f"dist_ema_240 {float(feature_snapshot.get('dist_ema_240')):.3f}")
+        if feature_snapshot.get("vol_regime_z") not in (None, ""):
+            parts.append(f"vol_z {float(feature_snapshot.get('vol_regime_z')):.2f}")
+        if feature_snapshot.get("breakout_up_10") not in (None, ""):
+            parts.append(f"brk_up {feature_snapshot.get('breakout_up_10')}")
+        if feature_snapshot.get("breakout_down_10") not in (None, ""):
+            parts.append(f"brk_down {feature_snapshot.get('breakout_down_10')}")
+        return " | ".join(parts) if parts else "Sem leitura recente das features."
+
+    def _snapshot_dict(self, payload: dict[str, Any], key: str) -> dict[str, Any]:
+        snapshot = payload.get(key)
+        return dict(snapshot) if isinstance(snapshot, dict) else {}
+
+    def _market_snapshot_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self._snapshot_dict(payload, "market_snapshot")
+        if snapshot:
+            return snapshot
+        return {
+            "bar_timestamp": payload.get("bar_timestamp"),
+            "open": payload.get("candle_open"),
+            "high": payload.get("candle_high"),
+            "low": payload.get("candle_low"),
+            "close": payload.get("candle_close"),
+            "volume": payload.get("candle_volume"),
+            "reference_price": payload.get("reference_price"),
+        }
+
+    def _feature_snapshot_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self._snapshot_dict(payload, "feature_snapshot")
+        if snapshot:
+            return snapshot
+        return {
+            "rsi_14": payload.get("rsi_14"),
+            "dist_ema_240": payload.get("dist_ema_240", payload.get("regime_dist_ema_240")),
+            "dist_ema_960": payload.get("dist_ema_960"),
+            "atr_pct": payload.get("atr_pct"),
+            "volatility_24": payload.get("volatility_24"),
+            "vol_regime_z": payload.get("vol_regime_z", payload.get("regime_vol_regime_z")),
+            "range_pct": payload.get("range_pct"),
+            "range_compression_10": payload.get("range_compression_10"),
+            "range_expansion_3": payload.get("range_expansion_3"),
+            "breakout_up_10": payload.get("breakout_up_10"),
+            "breakout_down_10": payload.get("breakout_down_10"),
+            "volume_zscore_20": payload.get("volume_zscore_20"),
+            "volume_ratio_20": payload.get("volume_ratio_20"),
+        }
+
+    def _decision_snapshot_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self._snapshot_dict(payload, "decision")
+        if snapshot:
+            return snapshot
+        final_action = float(payload.get("final_action", 0.0) or 0.0)
+        return {
+            "decision_mode": payload.get("decision_mode"),
+            "vote_bucket": payload.get("vote_bucket"),
+            "votes": payload.get("votes"),
+            "raw_actions": payload.get("raw_actions"),
+            "reason": payload.get("decision_reason"),
+            "final_action": final_action,
+            "tie_hold": payload.get("tie_hold"),
+            "confidence_pct": abs(final_action) * 100.0,
+        }
+
+    def _filter_snapshot_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self._snapshot_dict(payload, "filters")
+        if snapshot:
+            return snapshot
+        blocked_reason = payload.get("blocked_reason")
+        return {
+            "regime_valid_for_entry": payload.get("regime_valid"),
+            "regime_dist_ema_240": payload.get("regime_dist_ema_240"),
+            "regime_vol_regime_z": payload.get("regime_vol_regime_z"),
+            "regime_thresholds": {
+                "min_abs_dist_ema_240": float(self.cfg.environment.regime_min_abs_dist_ema_240),
+                "min_vol_regime_z": float(self.cfg.environment.regime_min_vol_regime_z),
+            },
+            "blocked_reason": blocked_reason,
+            "blocked_reason_human": self._human_block_label(str(blocked_reason)) if blocked_reason else None,
+        }
+
+    def _rsi_profile(self, value: Any) -> str:
+        rsi_value = _safe_float(value)
+        if rsi_value is None:
+            return "--"
+        if rsi_value <= 30.0:
+            regime = "sobrevenda"
+        elif rsi_value >= 70.0:
+            regime = "sobrecompra"
+        else:
+            regime = "neutro"
+        return f"{rsi_value:.1f} ({regime})"
+
+    def _format_vote_distribution(self, votes: Any) -> str:
+        if not isinstance(votes, dict):
+            return "--"
+        try:
+            buy = int(votes.get("buy", 0) or 0)
+            hold = int(votes.get("hold", 0) or 0)
+            sell = int(votes.get("sell", 0) or 0)
+        except (TypeError, ValueError):
+            return "--"
+        return f"BUY {buy} | HOLD {hold} | SELL {sell}"
+
+    def _format_raw_actions(self, raw_actions: Any) -> str:
+        if not isinstance(raw_actions, list) or not raw_actions:
+            return "--"
+        values: list[str] = []
+        for raw_action in raw_actions:
+            number = _safe_float(raw_action)
+            if number is None:
+                continue
+            values.append(f"{number:+.3f}")
+        return ", ".join(values) if values else "--"
+
+    def _build_model_interpretation(self, decision_snapshot: dict[str, Any]) -> str:
+        if not decision_snapshot or not any(
+            decision_snapshot.get(key) not in (None, "", {})
+            for key in ("vote_bucket", "votes", "final_action")
+        ):
+            return "Sem leitura recente do ensemble."
+        bucket = str(decision_snapshot.get("vote_bucket", "hold") or "hold").upper()
+        votes = decision_snapshot.get("votes")
+        confidence_pct = _safe_float(decision_snapshot.get("confidence_pct"))
+
+        total_votes = 0
+        winner_votes = 0
+        if isinstance(votes, dict):
+            normalized_votes: list[int] = []
+            for value in votes.values():
+                try:
+                    normalized_votes.append(max(0, int(value or 0)))
+                except (TypeError, ValueError):
+                    normalized_votes.append(0)
+            total_votes = sum(normalized_votes)
+            winner_votes = max(normalized_votes) if normalized_votes else 0
+
+        consensus_ratio = (winner_votes / total_votes) if total_votes else 0.0
+        if bool(decision_snapshot.get("tie_hold")):
+            confidence_label = "Confianca Baixa"
+            rationale = "Empate entre modelos; HOLD defensivo"
+        elif bucket == "HOLD":
+            confidence_label = "Confianca Baixa"
+            rationale = f"Maioria em HOLD ({winner_votes}/{total_votes})" if total_votes else "Maioria em HOLD"
+        elif consensus_ratio >= 0.75 and (confidence_pct or 0.0) >= 60.0:
+            confidence_label = "Confianca Alta"
+            rationale = f"Consenso forte em {bucket}"
+        elif consensus_ratio >= 0.60 and (confidence_pct or 0.0) >= 35.0:
+            confidence_label = "Confianca Media"
+            rationale = f"Maioria consistente em {bucket}"
+        else:
+            confidence_label = "Confianca Baixa"
+            rationale = f"Direcao {bucket} com consenso fraco"
+
+        if confidence_pct is not None:
+            rationale = f"{rationale} ({confidence_pct:.0f}%)"
+        return f"{confidence_label} - {rationale}"
+
+    def _build_regime_diagnostic(
+        self,
+        feature_snapshot: dict[str, Any],
+        filter_snapshot: dict[str, Any],
+    ) -> list[str]:
+        reasons: list[str] = []
+        thresholds = filter_snapshot.get("regime_thresholds")
+        thresholds = thresholds if isinstance(thresholds, dict) else {}
+
+        dist_value = _safe_float(feature_snapshot.get("dist_ema_240", filter_snapshot.get("regime_dist_ema_240")))
+        min_dist = _safe_float(thresholds.get("min_abs_dist_ema_240"))
+        if dist_value is not None and min_dist is not None and abs(dist_value) < min_dist:
+            reasons.append(
+                f"Distancia da EMA fora do range ({_optional_pct(dist_value)} < {_optional_pct(min_dist, signed=False)})"
+            )
+
+        vol_value = _safe_float(feature_snapshot.get("vol_regime_z", filter_snapshot.get("regime_vol_regime_z")))
+        min_vol = _safe_float(thresholds.get("min_vol_regime_z"))
+        if vol_value is not None and min_vol is not None and vol_value <= min_vol:
+            reasons.append(
+                f"Volatilidade insuficiente ({_optional_number(vol_value, 2)} < {_optional_number(min_vol, 2)})"
+            )
+
+        if not reasons and not bool(filter_snapshot.get("regime_valid_for_entry")):
+            blocked_reason = str(filter_snapshot.get("blocked_reason_human") or filter_snapshot.get("blocked_reason") or "")
+            if blocked_reason:
+                reasons.append(blocked_reason)
+        return reasons
+
+    def _apply_cycle_payload(self, payload: dict[str, Any], *, source: str) -> None:
+        self._ensure_daily_rollover()
+        self.health_state.bot_running = True
+        self.health_state.executor_alive = True
+        self.state.last_update_label = datetime.now().strftime("%H:%M:%S")
+
+        market_snapshot = self._market_snapshot_from_payload(payload)
+        feature_snapshot = self._feature_snapshot_from_payload(payload)
+        decision_snapshot = self._decision_snapshot_from_payload(payload)
+        filter_snapshot = self._filter_snapshot_from_payload(payload)
+
+        self.state.market_snapshot = market_snapshot
+        self.state.feature_snapshot = feature_snapshot
+        self.state.decision_snapshot = decision_snapshot
+        self.state.filter_snapshot = filter_snapshot
+
+        final_action = decision_snapshot.get("final_action", payload.get("final_action", 0.0))
+        vote_bucket = decision_snapshot.get("vote_bucket", payload.get("vote_bucket", "--"))
+        blocked_reason = filter_snapshot.get("blocked_reason", payload.get("blocked_reason"))
+
+        self.state.reference_price = _optional_price(
+            market_snapshot.get("reference_price", payload.get("reference_price", 0.0))
+        )
+        self.state.risk_label = _pct(payload.get("dynamic_risk_pct", payload.get("risk_pct", 0.0)))
+        self.state.strength_label = _strength(final_action)
+        self.state.regime_label = "valido" if filter_snapshot.get("regime_valid_for_entry") else "bloqueado"
+        self.state.signal_label = self._signal_label(float(final_action or 0.0))
+        self.state.direction_label = str(vote_bucket or "--").upper()
+        self.state.balance_label = _currency(payload.get("available_to_trade", 0.0))
+        self.state.blocker_label = self._human_block_label(str(blocked_reason)) if blocked_reason else "Sem bloqueio"
+        self.state.context_summary_label = self._build_context_summary(payload)
+        self.state.feature_summary_label = self._build_feature_summary(payload)
+        self.state.last_raw_detail = json.dumps(payload, ensure_ascii=False, indent=2)
+
+        position_label = str(payload.get("position_label", "FLAT")).upper()
+        self.state.position_label = position_label
+        self.state.position_size_label = _currency(payload.get("adjusted_notional", payload.get("notional_value", 0.0)))
+        self.state.entry_label = _price(payload.get("position_avg_entry_price", 0.0))
+        self.state.take_profit_label = _price(payload.get("take_profit_price", 0.0))
+        self.state.stop_loss_label = _price(payload.get("stop_loss_price", 0.0))
+        pnl_value = float(payload.get("position_unrealized_pnl", 0.0) or 0.0)
+        self.state.pnl_label = _currency(pnl_value)
+        self.state.pnl_style = "success" if pnl_value >= 0 else "error"
+
+        if payload.get("error"):
+            self.state.state_label = "ERRO"
+            self.state.state_message = "Execucao com erro. Revisar operacao."
+            self.state.state_style = "error"
+        elif blocked_reason:
+            self.state.state_label = "BLOQUEADO"
+            self.state.state_message = self._human_block_label(str(blocked_reason))
+            self.state.state_style = "blocked"
+        elif payload.get("position_is_open"):
+            self.state.state_label = position_label
+            self.state.state_message = f"Posicao {position_label} em andamento."
+            self.state.state_style = "long" if position_label == "LONG" else "short"
+        elif self.state.signal_label == "HOLD":
+            self.state.state_label = "AGUARDANDO"
+            self.state.state_message = "Sem entrada nesta barra."
+            self.state.state_style = "wait"
+        else:
+            self.state.state_label = "FLAT"
+            self.state.state_message = "Sem posicao aberta."
+            self.state.state_style = "flat"
+
+        if payload.get("position_is_open"):
+            self.state.position_status = f"{position_label} aberta no momento"
+        elif blocked_reason:
+            self.state.position_status = "Sem posicao; entrada bloqueada"
+        else:
+            self.state.position_status = "Sem sinal ativo"
+
+        self._refresh_dashboard()
+
+        event = self._new_event(
+            source=source,
+            event_type="cycle",
+            raw_line=json.dumps(payload, ensure_ascii=False),
+            payload=payload,
+            severity="execution",
+            event_code="execution.cycle",
+        )
+        summary = self.log_translator.local.summarize(event)
+        if payload.get("opened_trade"):
+            self.state.operations_today_label = self._increment_counter_label(self.state.operations_today_label)
+            self.state.last_trade_reason_label = summary.message_human
+        elif payload.get("closed_trade"):
+            self.state.last_trade_reason_label = summary.message_human
+        elif blocked_reason:
+            self.state.blocked_today_label = self._increment_counter_label(self.state.blocked_today_label)
+            self.state.last_skip_reason_label = summary.message_human
+        else:
+            self.state.last_skip_reason_label = summary.message_human
+        self.state.last_decision = summary.message_human
+        self._refresh_dashboard()
+        self._push_event(event, prebuilt=summary)
+
+    def _refresh_dashboard(self) -> None:
+        self.state.symbol_label = str(self.cfg.hyperliquid.symbol)
+        self.state.timeframe_label = str(self.cfg.hyperliquid.timeframe)
+        self.state.execution_mode_label = str(self._current_mode().execution_mode)
+        self.state.connection_label = self.health_state.status
+        self.state.last_valid_check_label = (
+            self.health_state.last_successful_healthcheck_at.strftime("%H:%M:%S")
+            if self.health_state.last_successful_healthcheck_at is not None
+            else "--"
+        )
+        self.mode_badge.setText(self.state.network_label)
+        self.state_pill.setText(self.state.state_label)
+        _set_widget_property(self.state_pill, "status", self.state.state_style)
+        self.state_message.setText(self.state.state_message)
+        self.balance_inline.setText(self.state.balance_label)
+        _fit_label_height(self.state_message)
+        _fit_label_height(self.balance_inline)
+        self.state_message.updateGeometry()
+
+        self.signal_tile.update_tile(_display_value(self.state.signal_label, "nenhum"), tone="default")
+        reason_value = self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else self.state.state_message
+        self.reason_tile.update_tile(_display_value(reason_value, "indefinido"), tone="default")
+        self.price_tile.update_tile(self.state.reference_price, tone="default")
+        self.risk_tile.update_tile(self.state.risk_label, tone="warning")
+        self.position_tile.update_tile(_display_value(self.state.position_label, "FLAT"), tone="default")
+        self.pnl_tile.update_tile(self.state.pnl_label, tone=self.state.pnl_style)
+
+        self.position_pill.setText(self.state.position_label)
+        position_style = "long" if self.state.position_label == "LONG" else "short" if self.state.position_label == "SHORT" else "flat"
+        _set_widget_property(self.position_pill, "status", position_style)
+        self.position_status.setText(self.state.position_status)
+        _fit_label_height(self.position_status)
+        self.position_status.updateGeometry()
+        self.pnl_value.setText(self.state.pnl_label)
+        _fit_label_height(self.pnl_value)
+        _set_widget_property(self.pnl_value, "tone", self.state.pnl_style)
+        self.position_size_value.setText(self.state.position_size_label)
+        _fit_label_height(self.position_size_value)
+        self.entry_value.setText(self.state.entry_label)
+        _fit_label_height(self.entry_value)
+        self.tp_value.setText(self.state.take_profit_label)
+        _fit_label_height(self.tp_value)
+        self.sl_value.setText(self.state.stop_loss_label)
+        _fit_label_height(self.sl_value)
+
+        self.connection_tile.update_tile(_display_value(self.state.connection_label, "offline"), tone="default")
+        self.heartbeat_tile.update_tile(_display_value(self.state.last_valid_check_label, "--"), tone="default")
+        self.operations_today_tile.update_tile(_display_value(self.state.operations_today_label, "0"), tone="default")
+        self.blocked_today_tile.update_tile(_display_value(self.state.blocked_today_label, "0"), tone="default")
+
+        def set_detail_block(value_label: QLabel, value_text: str, note_label: QLabel, note_text: str | None = None) -> None:
+            value_label.setText(value_text)
+            _fit_label_height(value_label)
+            if note_text:
+                note_label.setText(note_text)
+                _fit_label_height(note_label)
+                note_label.show()
+            else:
+                note_label.hide()
+
+        current_reason = self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else self.state.state_message
+
+        self.details_decision_label.setText(self.state.last_decision)
+        _fit_label_height(self.details_decision_label)
+        self.details_decision_reason_label.setText(current_reason)
+        _fit_label_height(self.details_decision_reason_label)
+        self.details_decision_meta_label.setText(
+            f"Sinal {self.state.signal_label} | Direcao {self.state.direction_label} | Regime {self.state.regime_label} | Posicao {self.state.position_label}"
+        )
+        _fit_label_height(self.details_decision_meta_label)
+
+        market_snapshot = self.state.market_snapshot
+        feature_snapshot = self.state.feature_snapshot
+        decision_snapshot = self.state.decision_snapshot
+        filter_snapshot = self.state.filter_snapshot
+        thresholds = filter_snapshot.get("regime_thresholds")
+        thresholds = thresholds if isinstance(thresholds, dict) else {}
+
+        bar_timestamp = _display_value(market_snapshot.get("bar_timestamp"), "--")
+        close_text = _optional_price(market_snapshot.get("close"))
+        volume_text = _optional_number(market_snapshot.get("volume"), 0)
+        indicators_summary = "Sem snapshot tecnico recente."
+        if bar_timestamp != "--" or close_text != "--":
+            indicators_summary = f"Barra {bar_timestamp} | close {close_text}"
+        self.indicators_card.set_summary(indicators_summary)
+        self.indicators_card.set_field("rsi", self._rsi_profile(feature_snapshot.get("rsi_14")))
+        self.indicators_card.set_field("dist_ema_240", _optional_pct(feature_snapshot.get("dist_ema_240")))
+        self.indicators_card.set_field("vol_regime_z", _optional_number(feature_snapshot.get("vol_regime_z"), 2, signed=True))
+        self.indicators_card.set_field("volume_ratio_20", _optional_ratio(feature_snapshot.get("volume_ratio_20")))
+        indicators_note = None
+        if self.state.reference_price != "--" or volume_text != "--":
+            indicators_note = f"Referencia {self.state.reference_price} | volume da barra {volume_text}"
+        self.indicators_card.set_note(indicators_note)
+
+        interpretation = self._build_model_interpretation(decision_snapshot)
+        vote_bucket_text = str(decision_snapshot.get("vote_bucket", self.state.direction_label) or "--").upper()
+        final_action_text = _optional_number(decision_snapshot.get("final_action"), 3, signed=True)
+        intelligence_summary = "Ensemble sem leitura recente."
+        if vote_bucket_text != "--" or final_action_text != "--":
+            intelligence_summary = f"{vote_bucket_text} | acao final {final_action_text}"
+        self.intelligence_card.set_summary(intelligence_summary)
+        self.intelligence_card.set_field("interpretation", interpretation)
+        self.intelligence_card.set_field("vote_bucket", vote_bucket_text)
+        self.intelligence_card.set_field("votes", self._format_vote_distribution(decision_snapshot.get("votes")))
+        self.intelligence_card.set_field("final_action", final_action_text)
+        if decision_snapshot:
+            intelligence_reason = _display_value(decision_snapshot.get("reason"), "Sem justificativa tecnica.")
+            intelligence_raw_actions = self._format_raw_actions(decision_snapshot.get("raw_actions"))
+            self.intelligence_card.set_note(f"Motivo: {intelligence_reason} | raw_actions: {intelligence_raw_actions}")
+        else:
+            self.intelligence_card.set_note(None)
+
+        if filter_snapshot:
+            regime_valid = bool(filter_snapshot.get("regime_valid_for_entry"))
+            regime_reasons = self._build_regime_diagnostic(feature_snapshot, filter_snapshot)
+            regime_summary = "Regime valido para entrada" if regime_valid else "Regime invalido para entrada"
+            regime_diagnostic = " | ".join(regime_reasons) if regime_reasons else "Filtros principais dentro do range."
+            dist_check = (
+                f"{_optional_pct(feature_snapshot.get('dist_ema_240'))} | min {_optional_pct(thresholds.get('min_abs_dist_ema_240'), signed=False)}"
+            )
+            vol_check = (
+                f"{_optional_number(feature_snapshot.get('vol_regime_z'), 2, signed=True)} | min {_optional_number(thresholds.get('min_vol_regime_z'), 2)}"
+            )
+            self.filters_card.set_summary(regime_summary)
+            self.filters_card.set_field("regime_status", "Valido" if regime_valid else "Invalido")
+            self.filters_card.set_field("regime_diagnostic", regime_diagnostic)
+            self.filters_card.set_field("dist_check", dist_check)
+            self.filters_card.set_field("vol_check", vol_check)
+            blocked_text = _display_value(
+                filter_snapshot.get("blocked_reason_human") or filter_snapshot.get("blocked_reason"),
+                "Nenhum bloqueio ativo",
+            )
+            self.filters_card.set_note(f"Bloqueio atual: {blocked_text}")
+        else:
+            self.filters_card.set_summary("Sem snapshot de filtros.")
+            self.filters_card.set_field("regime_status", "--")
+            self.filters_card.set_field("regime_diagnostic", "Aguardando o proximo ciclo runtime.")
+            self.filters_card.set_field("dist_check", "--")
+            self.filters_card.set_field("vol_check", "--")
+            self.filters_card.set_note(None)
+
+        set_detail_block(
+            self.details_context_value,
+            self.state.context_summary_label,
+            self.details_context_note,
+            f"Preco de referencia {self.state.reference_price} | Risco {self.state.risk_label}",
+        )
+        set_detail_block(
+            self.details_trade_value,
+            self.state.last_trade_reason_label,
+            self.details_trade_note,
+            f"Posicao atual {self.state.position_label} | Tamanho {self.state.position_size_label}",
+        )
+        set_detail_block(
+            self.details_skip_value,
+            self.state.last_skip_reason_label,
+            self.details_skip_note,
+            f"Bloqueio atual: {self.state.blocker_label}",
+        )
+        set_detail_block(
+            self.details_features_value,
+            self.state.feature_summary_label,
+            self.details_features_note,
+            f"Entrada {self.state.entry_label} | TP {self.state.take_profit_label} | SL {self.state.stop_loss_label}",
+        )
+
     def _update_navigation_state(self) -> None:
         labels = {"dashboard": "Dashboard", "details": "Detalhes", "events": "Eventos"}
         for key, button in self.page_buttons.items():
@@ -2143,9 +2668,9 @@ class TraderBotLauncher(QMainWindow):
         mapping = {
             "regime_filter": "Entrada bloqueada pelo filtro de regime",
             "cooldown": "Entrada bloqueada pelo cooldown",
-            "force_exit_only_by_tp_sl": "Sinal ignorado: posicao travada por TP/SL",
-            "min_notional_risk": "Entrada pulada por risco minimo x notional",
-            "exchange_position_present": "Entrada ignorada: posicao ja existe",
+            "force_exit_only_by_tp_sl": "Sinal ignorado: posição travada por TP/SL",
+            "min_notional_risk": "Entrada pulada por risco mínimo x notional",
+            "exchange_position_present": "Entrada ignorada: posição já existe",
             "duplicate_cycle_order": "Entrada ignorada para evitar ordem duplicada",
         }
         return mapping.get(reason, reason.replace("_", " "))
