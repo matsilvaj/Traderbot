@@ -33,12 +33,26 @@ Instalacao:
 pip install -r requirements.txt
 ```
 
+O `requirements.txt` agora contem apenas o core headless do bot e e o conjunto ideal para CLI e Docker.
+
+Para instalar tambem o launcher desktop:
+
+```powershell
+pip install -r requirements-ui.txt
+```
+
+Se voce estiver instalando o pacote via `pyproject.toml`, a alternativa e:
+
+```powershell
+pip install ".[gui]"
+```
+
 ## Launcher Desktop
 
 Launcher moderno para operacao do bot sem precisar editar o `config.yaml`:
 
 ```powershell
-python -m traderbot.launcher
+python -m traderbot.launcher_entry
 ```
 
 No Windows, voce tambem pode abrir direto por:

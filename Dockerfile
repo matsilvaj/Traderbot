@@ -30,7 +30,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv
-COPY pyproject.toml README.md requirements.txt config.yaml ./
+COPY pyproject.toml README.md requirements.txt requirements-ui.txt config.yaml ./
 COPY src ./src
 
 RUN mkdir -p /app/data /app/models /app/logs /app/results

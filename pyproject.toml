@@ -21,13 +21,17 @@ dependencies = [
   "python-dotenv>=1.0.1",
   "requests>=2.31.0",
   "SQLAlchemy>=2.0.30",
-  "psycopg[binary]>=3.1.18",
+  "psycopg[binary]>=3.1.18"
+]
+
+[project.optional-dependencies]
+gui = [
   "PySide6>=6.8.0",
   "openai>=1.0.0"
 ]
 
 [project.scripts]
-traderbot-launcher = "traderbot.launcher:main"
+traderbot-launcher = "traderbot.launcher_entry:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
