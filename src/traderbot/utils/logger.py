@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import sys
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 from queue import Queue
@@ -72,7 +73,7 @@ def setup_logger(name: str, logs_dir: str, level: int = logging.INFO) -> logging
         )
         file_handler.setFormatter(formatter)
 
-        console_handler = logging.StreamHandler()
+        console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
 
         log_queue: Queue[logging.LogRecord] = Queue()

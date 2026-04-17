@@ -93,6 +93,45 @@ QPushButton#primary:pressed {
     background-color: #6D28D9;
 }
 
+QPushButton#PrimaryButton[runtimeState="starting"] {
+    background-color: #2563EB;
+    color: white;
+}
+
+QPushButton#PrimaryButton[runtimeState="starting"]:hover {
+    background-color: #1D4ED8;
+}
+
+QPushButton#PrimaryButton[runtimeState="starting"]:pressed {
+    background-color: #1E40AF;
+}
+
+QPushButton#PrimaryButton[runtimeState="running"] {
+    background-color: #16A34A;
+    color: white;
+}
+
+QPushButton#PrimaryButton[runtimeState="running"]:hover {
+    background-color: #15803D;
+}
+
+QPushButton#PrimaryButton[runtimeState="running"]:pressed {
+    background-color: #166534;
+}
+
+QPushButton#PrimaryButton[runtimeState="stopping"] {
+    background-color: #F59E0B;
+    color: #0B0F14;
+}
+
+QPushButton#PrimaryButton[runtimeState="stopping"]:hover {
+    background-color: #D97706;
+}
+
+QPushButton#PrimaryButton[runtimeState="stopping"]:pressed {
+    background-color: #B45309;
+}
+
 QPushButton#SecondaryButton {
     background-color: transparent;
 }

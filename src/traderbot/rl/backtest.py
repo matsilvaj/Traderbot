@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -252,25 +253,37 @@ def run_backtest_ensemble(
 
 
 def save_backtest_result(result: BacktestResult, results_dir: str, prefix: str) -> dict[str, str]:
+    logger = logging.getLogger(__name__)
     Path(results_dir).mkdir(parents=True, exist_ok=True)
 
     trades_path = Path(results_dir) / f"{prefix}_trades.csv"
     equity_path = Path(results_dir) / f"{prefix}_equity.csv"
-    save_session_metrics(
-        session_id=prefix,
-        total_profit=float(result.metrics.get("total_profit", 0.0)),
-        win_rate=float(result.metrics.get("win_rate", 0.0)),
-        max_drawdown=float(result.metrics.get("max_drawdown", 0.0)),
-    )
+    metrics_saved = False
+    try:
+        save_session_metrics(
+            session_id=prefix,
+            total_profit=float(result.metrics.get("total_profit", 0.0)),
+            win_rate=float(result.metrics.get("win_rate", 0.0)),
+            max_drawdown=float(result.metrics.get("max_drawdown", 0.0)),
+        )
+        metrics_saved = True
+    except Exception as exc:
+        logger.warning(
+            "Falha ao persistir metricas do backtest na base de dados: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
 
     result.trades.to_csv(trades_path, index=False)
     result.equity_curve.to_csv(equity_path, index=False)
 
-    return {
-        "metrics_session_id": prefix,
+    payload = {
         "trades": str(trades_path),
         "equity": str(equity_path),
     }
+    if metrics_saved:
+        payload["metrics_session_id"] = prefix
+    return payload
 
 
 def print_metrics(metrics: dict[str, Any]) -> str:

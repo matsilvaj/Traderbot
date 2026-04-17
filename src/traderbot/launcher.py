@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -268,7 +269,11 @@ class TranslationTask(QRunnable):
 
     def run(self) -> None:
         result = self.translator.translate(self.event, self.fallback)
-        self.signals.finished.emit(result)
+        try:
+            self.signals.finished.emit(result)
+        except RuntimeError:
+            # A janela pode ter sido fechada e destruido o QObject dono do sinal.
+            pass
 
 
 class MetricTile(QFrame):
@@ -716,6 +721,9 @@ class TraderBotLauncher(QMainWindow):
         self.health_state = OperationalHealthState()
         self.last_connection_signature: tuple[Any, ...] | None = None
         self.runtime_stop_requested = False
+        self._awaiting_initial_snapshot = True
+        self._initial_check_attempts = 0
+        self._startup_check_scheduled = False
         self.stats_day = date.today()
         self._active_toast: EventToast | None = None
         self._run_stderr_buffer = ""
@@ -749,8 +757,6 @@ class TraderBotLauncher(QMainWindow):
         self.health_timer.setInterval(int(self.cfg.launcher.auto_check_interval_seconds) * 1000)
         self.health_timer.timeout.connect(self._auto_check)
         self.health_timer.start()
-
-        QTimer.singleShot(350, lambda: self._run_check(silent=True))
 
     def _build_process(self, output_handler, stderr_handler, finished_handler) -> QProcess:
         process = QProcess(self)
@@ -900,6 +906,7 @@ class TraderBotLauncher(QMainWindow):
         self.run_button = QPushButton("INICIAR BOT")
         self.run_button.setObjectName("PrimaryButton")
         self.run_button.setProperty("dashboardAction", True)
+        self.run_button.setProperty("runtimeState", "idle")
         self.run_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.run_button.clicked.connect(self._toggle_run)
         actions.addWidget(self.run_button)
@@ -1392,7 +1399,7 @@ class TraderBotLauncher(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "main_stack"):
             self._apply_responsive_layout()
-        if hasattr(self, "_active_toast") and self._active_toast is not None and self._active_toast.isVisible():
+        if hasattr(self, "_active_toast") and self._active_toast_visible():
             self._position_toast(self._active_toast)
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -1428,11 +1435,39 @@ class TraderBotLauncher(QMainWindow):
 
         event.accept()
 
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._startup_check_scheduled:
+            return
+        self._startup_check_scheduled = True
+        self._schedule_initial_check(900)
+
     def _sync_mode_buttons(self) -> None:
         mode = self._current_mode()
         self.mode_badge.setText(mode.label.upper())
         for key, button in self.mode_buttons.items():
             button.setChecked(key == self.current_mode)
+
+    def _has_complete_initial_snapshot(self) -> bool:
+        return (
+            self.health_state.last_successful_healthcheck_at is not None
+            and self.state.balance_label != "--"
+        )
+
+    def _schedule_initial_check(self, delay_ms: int) -> None:
+        QTimer.singleShot(delay_ms, self._run_initial_check)
+
+    def _run_initial_check(self) -> None:
+        if not self._awaiting_initial_snapshot:
+            return
+        if self._has_complete_initial_snapshot():
+            self._awaiting_initial_snapshot = False
+            return
+        if self.task_process.state() != QProcess.NotRunning:
+            self._schedule_initial_check(1200)
+            return
+        self._initial_check_attempts += 1
+        self._run_check(silent=True)
 
     def _update_controls(self) -> None:
         run_busy = self.run_process.state() != QProcess.NotRunning
@@ -1444,19 +1479,67 @@ class TraderBotLauncher(QMainWindow):
         self.smoke_button.setEnabled(not task_busy and not run_busy)
         self.settings_button.setEnabled(not task_busy and not run_busy)
         self.kill_button.setEnabled(not task_busy)
-        self.run_button.setText("PARAR BOT" if run_busy else "INICIAR BOT")
+        self.run_button.setEnabled(run_busy or not task_busy)
+        if run_busy and self.runtime_stop_requested:
+            run_label = "PARANDO..."
+            run_state = "stopping"
+        elif run_busy and self.state.state_label == "INICIANDO":
+            run_label = "INICIANDO..."
+            run_state = "starting"
+        elif run_busy:
+            run_label = "BOT RODANDO"
+            run_state = "running"
+        else:
+            run_label = "INICIAR BOT"
+            run_state = "idle"
+        self.run_button.setText(run_label)
+        _set_widget_property(self.run_button, "runtimeState", run_state)
         self.smoke_button.setText("Executando..." if task_busy and task_label == "Smoke test" else "Smoke test")
 
     def _current_mode(self) -> LauncherMode:
         return MODES[self.current_mode]
 
     def _build_base_args(self, mode: LauncherMode) -> list[str]:
-        args = ["-m", "traderbot.main", "--config", str(self.config_path)]
+        args = ["-u", "-m", "traderbot.main", "--config", str(self.config_path)]
         args.extend(["--network-override", mode.network])
         args.extend(["--execution-mode-override", mode.execution_mode])
         if mode.allow_live_trading:
             args.append("--allow-live-trading")
         return args
+
+    def _resolve_process_python_executable(self) -> str:
+        executable = Path(sys.executable)
+        name = executable.name.lower()
+
+        candidates: list[Path] = []
+        if name == "pythonw.exe":
+            candidates.append(executable.with_name("python.exe"))
+        elif name == "pyw.exe":
+            py_path = shutil.which("py")
+            python_path = shutil.which("python")
+            if py_path:
+                candidates.append(Path(py_path))
+            if python_path:
+                candidates.append(Path(python_path))
+
+        candidates.append(executable)
+        python_on_path = shutil.which("python")
+        if python_on_path:
+            candidates.append(Path(python_on_path))
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            candidate_str = str(candidate)
+            if not candidate_str:
+                continue
+            normalized = candidate_str.lower()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            if candidate.exists() and candidate.name.lower() in {"python.exe", "py.exe", "python", "py"}:
+                return candidate_str
+
+        return str(executable)
 
     def _new_event(
         self,
@@ -1493,7 +1576,7 @@ class TraderBotLauncher(QMainWindow):
         process.setWorkingDirectory(str(REPO_ROOT))
         self._reset_process_stderr_buffer(process)
         self._active_task_context = {"label": label, "silent": silent}
-        process.start(sys.executable, args)
+        process.start(self._resolve_process_python_executable(), args)
         if not process.waitForStarted(3000):
             event = self._new_event(
                 source="launcher",
@@ -1620,8 +1703,7 @@ class TraderBotLauncher(QMainWindow):
         self.health_state.bot_running = False
         self.health_state.executor_alive = False
 
-        reason = "bot_not_running" if stop_requested else "runtime_process_exited"
-        self._apply_health_status("offline", reason, emit_event=not stop_requested)
+        self._refresh_connectivity_health(emit_event=not stop_requested)
 
         if exit_code != 0 and not stop_requested:
             summary = "Bot parado após falha do runtime. Revise o erro para retomar a operação."
@@ -1686,6 +1768,7 @@ class TraderBotLauncher(QMainWindow):
                 self.state.last_cycle_fingerprint = ""
                 if self.state.position_label not in {"LONG", "SHORT"}:
                     self.state.position_status = "Aguardando primeira avaliacao do runtime."
+                self._update_controls()
                 self._refresh_dashboard()
                 self._push_event(
                     self._new_event(
@@ -1712,6 +1795,7 @@ class TraderBotLauncher(QMainWindow):
             return
 
         self.runtime_stop_requested = True
+        self._update_controls()
         self.run_process.terminate()
 
         # Fallback de seguranca para garantir o encerramento apos 3 segundos se o terminate falhar
@@ -1848,6 +1932,9 @@ class TraderBotLauncher(QMainWindow):
 
     def _handle_run_finished(self, exit_code: int, _status) -> None:
         self._handle_run_output()
+        run_remainder = bytes(self.run_process.readAllStandardOutput()).decode("utf-8", errors="ignore").strip()
+        for raw_line in run_remainder.splitlines():
+            self._parse_line(raw_line, source="run")
         self._handle_run_stderr()
         stderr_buffer = self._consume_process_stderr(self.run_process)
         stop_requested = self.runtime_stop_requested
@@ -1875,6 +1962,9 @@ class TraderBotLauncher(QMainWindow):
 
     def _handle_task_finished(self, exit_code: int, _status) -> None:
         self._handle_task_output()
+        task_remainder = bytes(self.task_process.readAllStandardOutput()).decode("utf-8", errors="ignore").strip()
+        for raw_line in task_remainder.splitlines():
+            self._parse_line(raw_line, source="task")
         self._handle_task_stderr()
         stderr_buffer = self._consume_process_stderr(self.task_process)
         label = str(self._active_task_context.get("label") or "")
@@ -1884,6 +1974,13 @@ class TraderBotLauncher(QMainWindow):
             self.health_state.last_healthcheck_at = datetime.now()
             self.health_state.last_check_execution_ok = False
             self._refresh_connectivity_health(emit_event=True, forced_reason="health_check_command_failed")
+        if label == "Check Hyperliquid" and self._awaiting_initial_snapshot:
+            if self._has_complete_initial_snapshot():
+                self._awaiting_initial_snapshot = False
+            elif self._initial_check_attempts < 2:
+                self._schedule_initial_check(1500)
+            else:
+                self._awaiting_initial_snapshot = False
         if exit_code != 0 and stderr_buffer.strip():
             self._emit_process_error(
                 process_label=label or "Processo auxiliar",
@@ -1934,7 +2031,11 @@ class TraderBotLauncher(QMainWindow):
 
         plain = self._strip_prefix(line)
         if "Iniciando pipeline com comando: run" in plain:
+            self.state.state_label = "RODANDO"
+            self.state.state_message = "Runtime ativo. Aguardando proximo ciclo."
+            self.state.state_style = "wait"
             self.state.last_decision = "Runtime iniciado. Aguardando proximo ciclo."
+            self._update_controls()
             self._refresh_dashboard()
 
         event = self._new_event(
@@ -1988,11 +2089,13 @@ class TraderBotLauncher(QMainWindow):
                 self.state.position_status = f"Bot parado; revisar posição {self.state.position_label} na exchange."
             else:
                 self.state.position_status = "Bot parado. Nenhum runtime ativo."
+        self._refresh_dashboard()
         self._refresh_connectivity_health(
             emit_event=True,
             forced_reason="check_hyperliquid_ok" if health_ok else "check_hyperliquid_failed",
         )
-        self._refresh_dashboard()
+        if self._has_complete_initial_snapshot():
+            self._awaiting_initial_snapshot = False
 
         signature = (
             payload.get("connected"),
@@ -2105,14 +2208,30 @@ class TraderBotLauncher(QMainWindow):
         self.events_empty_label.setVisible(not has_events)
 
     def _position_toast(self, toast: EventToast) -> None:
-        toast.adjustSize()
-        x = max(18, self.width() - toast.width() - 28)
-        y = max(18, self.height() - toast.height() - 32)
-        toast.move(x, y)
+        try:
+            toast.adjustSize()
+            x = max(18, self.width() - toast.width() - 28)
+            y = max(18, self.height() - toast.height() - 32)
+            toast.move(x, y)
+        except RuntimeError:
+            if toast is self._active_toast:
+                self._active_toast = None
+
+    def _active_toast_visible(self) -> bool:
+        if self._active_toast is None:
+            return False
+        try:
+            return self._active_toast.isVisible()
+        except RuntimeError:
+            self._active_toast = None
+            return False
 
     def _show_event_toast(self, summary: HumanizedEvent) -> None:
-        if self._active_toast is not None and self._active_toast.isVisible():
-            self._active_toast.close()
+        if self._active_toast_visible():
+            try:
+                self._active_toast.close()
+            except RuntimeError:
+                self._active_toast = None
         self._active_toast = EventToast(summary, self)
         self._position_toast(self._active_toast)
         self._active_toast.show()
@@ -2195,10 +2314,6 @@ class TraderBotLauncher(QMainWindow):
     def _derive_health_status(self, *, forced_reason: str | None = None) -> tuple[str, str]:
         state = self.health_state
         threshold = max(30, int(self.cfg.launcher.auto_check_interval_seconds) * 2)
-        runtime_running = self.run_process.state() != QProcess.NotRunning
-
-        if not runtime_running:
-            return "offline", forced_reason if forced_reason == "runtime_process_exited" else "bot_not_running"
 
         if state.last_healthcheck_at is None:
             return "offline", forced_reason or "awaiting_first_healthcheck"
@@ -2623,29 +2738,23 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
         app.setStyleSheet(theme_path.read_text(encoding="utf-8"))
     window = TraderBotLauncher()
     window.show()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        try:
+            _launcher_lock.close()
+        except Exception:
+            pass
+        try:
+            if pid_file.exists():
+                pid_file.unlink()
+        except OSError:
+            pass
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     return _run_launcher_with_pid_lock(app)
-
-    # Single Instance Lock para o Launcher
-    _launcher_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        _launcher_lock.bind(("127.0.0.1", 54321))
-    except socket.error:
-        QMessageBox.critical(None, "Acesso Negado", "O TraderBot Launcher já está aberto!")
-        return 1
-
-    app.setStyle("Fusion")
-    app.setFont(QFont("Segoe UI", 10))
-    theme_path = REPO_ROOT / "theme.qss"
-    if theme_path.exists():
-        app.setStyleSheet(theme_path.read_text(encoding="utf-8"))
-    window = TraderBotLauncher()
-    window.show()
-    return app.exec()
 
 
 if __name__ == "__main__":

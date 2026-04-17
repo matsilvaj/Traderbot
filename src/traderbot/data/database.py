@@ -11,6 +11,9 @@ from sqlalchemy import DateTime, Float, Integer, String, create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+_DATABASE_DISABLED = False
+_DATABASE_DISABLED_REASON: str | None = None
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -57,6 +60,32 @@ def get_database_url() -> str:
     return _normalize_database_url(database_url)
 
 
+def _compact_database_error(exc: Exception) -> str:
+    message = str(exc).strip()
+    background_marker = "\n(Background on this error"
+    if background_marker in message:
+        message = message.split(background_marker, 1)[0].strip()
+    return f"{type(exc).__name__}: {message}"
+
+
+def _disable_database(exc: Exception) -> None:
+    global _DATABASE_DISABLED, _DATABASE_DISABLED_REASON
+    if _DATABASE_DISABLED:
+        return
+    _DATABASE_DISABLED = True
+    _DATABASE_DISABLED_REASON = _compact_database_error(exc)
+    get_session_factory.cache_clear()
+    get_engine.cache_clear()
+
+
+def database_persistence_enabled() -> bool:
+    return not _DATABASE_DISABLED
+
+
+def database_unavailable_reason() -> str | None:
+    return _DATABASE_DISABLED_REASON
+
+
 class Base(DeclarativeBase):
     """Base declarativa do SQLAlchemy."""
 
@@ -86,10 +115,13 @@ class Metric(Base):
 
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
-    return create_engine(
-        get_database_url(),
-        pool_pre_ping=True,
-    )
+    database_url = get_database_url()
+    engine_kwargs: dict[str, object] = {
+        "pool_pre_ping": True,
+    }
+    if database_url.startswith("postgresql+psycopg://"):
+        engine_kwargs["connect_args"] = {"connect_timeout": 5}
+    return create_engine(database_url, **engine_kwargs)
 
 
 @lru_cache(maxsize=1)
@@ -112,8 +144,14 @@ def session_scope(session_factory: sessionmaker[Session] | None = None) -> Itera
 
 
 def create_tables(engine: Engine | None = None) -> None:
+    if not database_persistence_enabled():
+        return
     database_engine = engine or get_engine()
-    Base.metadata.create_all(database_engine)
+    try:
+        Base.metadata.create_all(database_engine)
+    except Exception as exc:
+        _disable_database(exc)
+        raise
 
 
 def insert_trade(
@@ -125,7 +163,10 @@ def insert_trade(
     pnl: float | None = None,
     timestamp: datetime | None = None,
     session: Session | None = None,
-) -> Trade:
+) -> Trade | None:
+    if not database_persistence_enabled():
+        return None
+
     trade = Trade(
         timestamp=_coerce_timestamp(timestamp),
         symbol=str(symbol).strip().upper(),
@@ -135,17 +176,21 @@ def insert_trade(
         pnl=None if pnl is None else float(pnl),
     )
 
-    if session is not None:
-        session.add(trade)
-        session.flush()
-        session.refresh(trade)
-        return trade
+    try:
+        if session is not None:
+            session.add(trade)
+            session.flush()
+            session.refresh(trade)
+            return trade
 
-    with session_scope() as managed_session:
-        managed_session.add(trade)
-        managed_session.flush()
-        managed_session.refresh(trade)
-        return trade
+        with session_scope() as managed_session:
+            managed_session.add(trade)
+            managed_session.flush()
+            managed_session.refresh(trade)
+            return trade
+    except Exception as exc:
+        _disable_database(exc)
+        return None
 
 
 def save_session_metrics(
@@ -156,7 +201,10 @@ def save_session_metrics(
     max_drawdown: float,
     timestamp: datetime | None = None,
     session: Session | None = None,
-) -> Metric:
+) -> Metric | None:
+    if not database_persistence_enabled():
+        return None
+
     metric = Metric(
         session_id=str(session_id).strip(),
         timestamp=_coerce_timestamp(timestamp),
@@ -165,17 +213,21 @@ def save_session_metrics(
         max_drawdown=float(max_drawdown),
     )
 
-    if session is not None:
-        session.add(metric)
-        session.flush()
-        session.refresh(metric)
-        return metric
+    try:
+        if session is not None:
+            session.add(metric)
+            session.flush()
+            session.refresh(metric)
+            return metric
 
-    with session_scope() as managed_session:
-        managed_session.add(metric)
-        managed_session.flush()
-        managed_session.refresh(metric)
-        return metric
+        with session_scope() as managed_session:
+            managed_session.add(metric)
+            managed_session.flush()
+            managed_session.refresh(metric)
+            return metric
+    except Exception as exc:
+        _disable_database(exc)
+        return None
 
 
 __all__ = [
@@ -183,6 +235,8 @@ __all__ = [
     "Metric",
     "Trade",
     "create_tables",
+    "database_persistence_enabled",
+    "database_unavailable_reason",
     "get_database_url",
     "get_engine",
     "get_session_factory",

@@ -17,7 +17,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from traderbot.config import AppConfig, TIMEFRAME_MINUTES_MAP, ensure_directories, load_config
 from traderbot.data.hl_loader import HLDataLoader
 from traderbot.data.csv_loader import CSVDataLoader
-from traderbot.data.database import create_tables, insert_trade
+from traderbot.data.database import create_tables, database_unavailable_reason
 from traderbot.env.trading_env import TradingEnv
 from traderbot.execution.hl_executor import ExecutionDecision, HyperliquidExecutor
 from traderbot.features.engineering import FeatureEngineer, default_feature_columns
@@ -903,31 +903,6 @@ def _runtime_event_code(result: dict[str, Any], position_side: int) -> str:
     return "runtime.no_entry"
 
 
-def _persist_trade_event(
-    *,
-    logger,
-    symbol: str,
-    side: str,
-    price: float,
-    amount: float,
-    pnl: float | None = None,
-) -> None:
-    normalized_side = str(side).strip().lower()
-    if normalized_side not in {"buy", "sell"} or price <= 0 or amount <= 0:
-        return
-
-    try:
-        insert_trade(
-            symbol=symbol,
-            side=normalized_side,
-            price=price,
-            amount=amount,
-            pnl=pnl,
-        )
-    except Exception:
-        logger.exception("Falha ao persistir trade na base de dados.")
-
-
 def _handle_runtime_side_effects(
     cfg: AppConfig,
     result: dict[str, Any],
@@ -941,14 +916,6 @@ def _handle_runtime_side_effects(
         open_side = str(result.get("trade_direction", "")).strip().lower()
         open_price = _as_float(result.get("open_price") or position_snapshot.get("avg_entry_price"))
         open_amount = _as_float(result.get("position_size", result.get("volume", result.get("adjusted_volume", 0.0))))
-        _persist_trade_event(
-            logger=logger,
-            symbol=symbol,
-            side=open_side,
-            price=open_price,
-            amount=open_amount,
-            pnl=None,
-        )
         if notifier is not None and open_side in {"buy", "sell"} and open_price > 0 and open_amount > 0:
             notifier.notify_order_executed(
                 asset=symbol,
@@ -962,18 +929,8 @@ def _handle_runtime_side_effects(
         raw_side = int(close_event.get("side", 0) or 0)
         close_side = "sell" if raw_side > 0 else ("buy" if raw_side < 0 else "")
         close_price = _as_float(close_event.get("exit_price") or result.get("reference_price"))
-        close_amount = _as_float(close_event.get("volume") or result.get("position_size", 0.0))
         pnl_value_raw = close_event.get("pnl")
         pnl_value = None if pnl_value_raw in (None, "") else _as_float(pnl_value_raw)
-
-        _persist_trade_event(
-            logger=logger,
-            symbol=symbol,
-            side=close_side,
-            price=close_price,
-            amount=close_amount,
-            pnl=pnl_value,
-        )
         if notifier is not None and pnl_value is not None:
             notifier.notify_position_closed(
                 asset=symbol,
@@ -1727,7 +1684,6 @@ def parse_args():
 
 
 def main():
-    _acquire_bot_lock()
     args = parse_args()
     cfg = load_config(args.config)
     ensure_directories(cfg)
@@ -1737,9 +1693,18 @@ def main():
     notifier = TelegramNotifier(logger=logger)
 
     try:
-        create_tables()
-        logger.info("Tabelas PostgreSQL verificadas/inicializadas com sucesso.")
-        notifier.notify_startup()
+        if args.command == "backtest":
+            try:
+                create_tables()
+                logger.info("Tabelas PostgreSQL verificadas/inicializadas com sucesso.")
+            except Exception:
+                logger.info(
+                    "PostgreSQL indisponivel. Persistencia em banco desativada nesta execucao: %s",
+                    database_unavailable_reason() or "erro de conexao",
+                )
+
+        if args.command == "run":
+            notifier.notify_startup()
 
         logger.info("Iniciando pipeline com comando: %s", args.command)
 
@@ -1759,6 +1724,7 @@ def main():
         elif args.command == "backtest":
             backtest_pipeline(cfg, logger, args.model_path)
         elif args.command == "run":
+            _acquire_bot_lock()
             run_execution_pipeline(cfg, logger, args.model_path, notifier=notifier)
         elif args.command == "check-hyperliquid":
             check_hyperliquid_pipeline(cfg, logger)
