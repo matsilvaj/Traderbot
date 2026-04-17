@@ -15,7 +15,7 @@ from typing import Any
 
 import yaml
 from PySide6.QtCore import QObject, QProcess, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -867,12 +867,13 @@ class TraderBotLauncher(QMainWindow):
 
         self.main_stack = QStackedWidget()
         self.main_stack.setObjectName("MainStack")
-        self.page_keys = ["dashboard", "details", "events"]
+        self.page_keys = ["dashboard", "details", "events", "terminal"]
         self.page_indexes: dict[str, int] = {}
         for key, builder in (
             ("dashboard", self._build_dashboard_tab),
             ("details", self._build_details_tab),
             ("events", self._build_events_tab),
+            ("terminal", self._build_terminal_tab),
         ):
             page = builder()
             self.page_indexes[key] = self.main_stack.addWidget(page)
@@ -889,7 +890,12 @@ class TraderBotLauncher(QMainWindow):
         layout.setSpacing(8)
 
         self.page_buttons: dict[str, QPushButton] = {}
-        for key, label in (("dashboard", "Dashboard"), ("details", "Detalhes"), ("events", "Eventos")):
+        for key, label in (
+            ("dashboard", "Dashboard"),
+            ("details", "Detalhes"),
+            ("events", "Eventos"),
+            ("terminal", "Terminal"),
+        ):
             button = QPushButton(label)
             button.setObjectName("TabButton")
             button.setCheckable(True)
@@ -1259,6 +1265,39 @@ class TraderBotLauncher(QMainWindow):
         self.notifications_layout.addStretch(1)
         self.events_scroll.setWidget(self.notification_host)
         layout.addWidget(self.events_scroll, 1)
+        return tab
+
+    def _build_terminal_tab(self) -> QWidget:
+        tab = QWidget()
+        tab.setObjectName("TerminalTab")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        terminal_card = QFrame()
+        terminal_card.setObjectName("PositionCard")
+        terminal_layout = QVBoxLayout(terminal_card)
+        terminal_layout.setContentsMargins(18, 16, 18, 16)
+        terminal_layout.setSpacing(10)
+
+        title = QLabel("Terminal")
+        title.setObjectName("PanelTitle")
+        terminal_layout.addWidget(title)
+
+        hint = QLabel("Espelho bruto do stdout e stderr do runtime e dos comandos auxiliares.")
+        hint.setObjectName("HeroHint")
+        _configure_dynamic_label(hint)
+        terminal_layout.addWidget(hint)
+
+        self.terminal_output = QPlainTextEdit()
+        self.terminal_output.setObjectName("technicalLog")
+        self.terminal_output.setReadOnly(True)
+        self.terminal_output.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.terminal_output.setPlaceholderText("Aguardando saida dos processos...")
+        self.terminal_output.document().setMaximumBlockCount(6000)
+        terminal_layout.addWidget(self.terminal_output, 1)
+
+        layout.addWidget(terminal_card, 1)
         return tab
 
     def _build_level_box(self, title: str) -> tuple[QFrame, QLabel]:
@@ -1636,6 +1675,7 @@ class TraderBotLauncher(QMainWindow):
         payload = bytes(process.readAllStandardError()).decode("utf-8", errors="ignore")
         if not payload:
             return
+        self._append_terminal_output(payload)
         if process is self.run_process:
             self._run_stderr_buffer += payload
             return
@@ -1942,25 +1982,36 @@ class TraderBotLauncher(QMainWindow):
         args = self._build_base_args(self._current_mode()) + ["close-hyperliquid-position"]
         self._start_process(self.task_process, args, label="Kill switch", silent=False)
 
+    def _append_terminal_output(self, text: str) -> None:
+        if not text or not hasattr(self, "terminal_output"):
+            return
+        self.terminal_output.moveCursor(QTextCursor.End)
+        self.terminal_output.insertPlainText(text)
+        self.terminal_output.moveCursor(QTextCursor.End)
+        self.terminal_output.ensureCursorVisible()
+
     def _handle_run_output(self) -> None:
         while self.run_process.canReadLine():
-            raw_line = bytes(self.run_process.readLine()).decode("utf-8", errors="ignore").strip()
-            self._parse_line(raw_line, source="run")
+            raw_payload = bytes(self.run_process.readLine()).decode("utf-8", errors="ignore")
+            self._append_terminal_output(raw_payload)
+            self._parse_line(raw_payload.rstrip("\r\n"), source="run")
 
     def _handle_run_stderr(self) -> None:
         self._append_process_stderr(self.run_process)
 
     def _handle_task_output(self) -> None:
         while self.task_process.canReadLine():
-            raw_line = bytes(self.task_process.readLine()).decode("utf-8", errors="ignore").strip()
-            self._parse_line(raw_line, source="task")
+            raw_payload = bytes(self.task_process.readLine()).decode("utf-8", errors="ignore")
+            self._append_terminal_output(raw_payload)
+            self._parse_line(raw_payload.rstrip("\r\n"), source="task")
 
     def _handle_task_stderr(self) -> None:
         self._append_process_stderr(self.task_process)
 
     def _handle_run_finished(self, exit_code: int, _status) -> None:
         self._handle_run_output()
-        run_remainder = bytes(self.run_process.readAllStandardOutput()).decode("utf-8", errors="ignore").strip()
+        run_remainder = bytes(self.run_process.readAllStandardOutput()).decode("utf-8", errors="ignore")
+        self._append_terminal_output(run_remainder)
         for raw_line in run_remainder.splitlines():
             self._parse_line(raw_line, source="run")
         self._handle_run_stderr()
@@ -1990,7 +2041,8 @@ class TraderBotLauncher(QMainWindow):
 
     def _handle_task_finished(self, exit_code: int, _status) -> None:
         self._handle_task_output()
-        task_remainder = bytes(self.task_process.readAllStandardOutput()).decode("utf-8", errors="ignore").strip()
+        task_remainder = bytes(self.task_process.readAllStandardOutput()).decode("utf-8", errors="ignore")
+        self._append_terminal_output(task_remainder)
         for raw_line in task_remainder.splitlines():
             self._parse_line(raw_line, source="task")
         self._handle_task_stderr()
@@ -2667,7 +2719,12 @@ class TraderBotLauncher(QMainWindow):
         )
 
     def _update_navigation_state(self) -> None:
-        labels = {"dashboard": "Dashboard", "details": "Detalhes", "events": "Eventos"}
+        labels = {
+            "dashboard": "Dashboard",
+            "details": "Detalhes",
+            "events": "Eventos",
+            "terminal": "Terminal",
+        }
         for key, button in self.page_buttons.items():
             button.setChecked(key == self.current_page)
             unread = key == "events" and self.unread_events > 0
