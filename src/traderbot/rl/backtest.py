@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from traderbot.config import EnvironmentConfig
+from traderbot.data.database import save_session_metrics
 from traderbot.env.trading_env import TradingEnv
 
 
@@ -254,18 +254,20 @@ def run_backtest_ensemble(
 def save_backtest_result(result: BacktestResult, results_dir: str, prefix: str) -> dict[str, str]:
     Path(results_dir).mkdir(parents=True, exist_ok=True)
 
-    metrics_path = Path(results_dir) / f"{prefix}_metrics.json"
     trades_path = Path(results_dir) / f"{prefix}_trades.csv"
     equity_path = Path(results_dir) / f"{prefix}_equity.csv"
-
-    with metrics_path.open("w", encoding="utf-8") as f:
-        json.dump(result.metrics, f, ensure_ascii=False, indent=2)
+    save_session_metrics(
+        session_id=prefix,
+        total_profit=float(result.metrics.get("total_profit", 0.0)),
+        win_rate=float(result.metrics.get("win_rate", 0.0)),
+        max_drawdown=float(result.metrics.get("max_drawdown", 0.0)),
+    )
 
     result.trades.to_csv(trades_path, index=False)
     result.equity_curve.to_csv(equity_path, index=False)
 
     return {
-        "metrics": str(metrics_path),
+        "metrics_session_id": prefix,
         "trades": str(trades_path),
         "equity": str(equity_path),
     }

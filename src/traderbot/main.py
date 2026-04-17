@@ -15,6 +15,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from traderbot.config import AppConfig, TIMEFRAME_MINUTES_MAP, ensure_directories, load_config
 from traderbot.data.hl_loader import HLDataLoader
 from traderbot.data.csv_loader import CSVDataLoader
+from traderbot.data.database import create_tables, insert_trade
 from traderbot.env.trading_env import TradingEnv
 from traderbot.execution.hl_executor import ExecutionDecision, HyperliquidExecutor
 from traderbot.features.engineering import FeatureEngineer, default_feature_columns
@@ -26,6 +27,7 @@ from traderbot.rl.backtest import (
 )
 from traderbot.rl.model_manager import RLModelManager
 from traderbot.utils.logger import setup_logger
+from traderbot.utils.telegram_notifier import TelegramNotifier
 
 DEFAULT_MULTI_SEEDS = [1, 7, 21, 42, 84, 123, 256, 512, 999, 2004]
 
@@ -887,6 +889,85 @@ def _runtime_event_code(result: dict[str, Any], position_side: int) -> str:
     return "runtime.no_entry"
 
 
+def _persist_trade_event(
+    *,
+    logger,
+    symbol: str,
+    side: str,
+    price: float,
+    amount: float,
+    pnl: float | None = None,
+) -> None:
+    normalized_side = str(side).strip().lower()
+    if normalized_side not in {"buy", "sell"} or price <= 0 or amount <= 0:
+        return
+
+    try:
+        insert_trade(
+            symbol=symbol,
+            side=normalized_side,
+            price=price,
+            amount=amount,
+            pnl=pnl,
+        )
+    except Exception:
+        logger.exception("Falha ao persistir trade na base de dados.")
+
+
+def _handle_runtime_side_effects(
+    cfg: AppConfig,
+    result: dict[str, Any],
+    logger,
+    notifier: TelegramNotifier | None = None,
+) -> None:
+    symbol = str(cfg.hyperliquid.symbol).strip().upper()
+    position_snapshot = result.get("position_snapshot") or {}
+
+    if bool(result.get("opened_position", False)):
+        open_side = str(result.get("trade_direction", "")).strip().lower()
+        open_price = _as_float(result.get("open_price") or position_snapshot.get("avg_entry_price"))
+        open_amount = _as_float(result.get("position_size", result.get("volume", result.get("adjusted_volume", 0.0))))
+        _persist_trade_event(
+            logger=logger,
+            symbol=symbol,
+            side=open_side,
+            price=open_price,
+            amount=open_amount,
+            pnl=None,
+        )
+        if notifier is not None and open_side in {"buy", "sell"} and open_price > 0 and open_amount > 0:
+            notifier.notify_order_executed(
+                asset=symbol,
+                side=open_side,
+                price=open_price,
+                quantity=open_amount,
+            )
+
+    if bool(result.get("closed_position", False)):
+        close_event = result.get("close_event") or result.get("stop_take_event") or {}
+        raw_side = int(close_event.get("side", 0) or 0)
+        close_side = "sell" if raw_side > 0 else ("buy" if raw_side < 0 else "")
+        close_price = _as_float(close_event.get("exit_price") or result.get("reference_price"))
+        close_amount = _as_float(close_event.get("volume") or result.get("position_size", 0.0))
+        pnl_value_raw = close_event.get("pnl")
+        pnl_value = None if pnl_value_raw in (None, "") else _as_float(pnl_value_raw)
+
+        _persist_trade_event(
+            logger=logger,
+            symbol=symbol,
+            side=close_side,
+            price=close_price,
+            amount=close_amount,
+            pnl=pnl_value,
+        )
+        if notifier is not None and pnl_value is not None:
+            notifier.notify_position_closed(
+                asset=symbol,
+                pnl=pnl_value,
+                side=close_side,
+            )
+
+
 def _build_decision_reason(vote_info: dict[str, Any], final_action: float, hold_threshold: float) -> str:
     bucket = str(vote_info.get("bucket", "hold")).upper()
     if vote_info.get("mode") == "ensemble":
@@ -1209,7 +1290,12 @@ def sleep_until_next_cycle(timeframe: str) -> None:
     time.sleep(sleep_seconds)
 
 
-def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
+def run_execution_pipeline(
+    cfg: AppConfig,
+    logger,
+    model_path: str | None,
+    notifier: TelegramNotifier | None = None,
+):
     env_cfg = prepare_runtime_environment_cfg(cfg, logger)
     fe, cols, train_df = prepare_live_inference_context(cfg, logger)
 
@@ -1265,6 +1351,8 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
         float(cfg.environment.slippage_pct),
     )
     last_retrain = time.time()
+    last_runtime_error_signature = ""
+    last_runtime_error_notified_at = 0.0
 
     try:
         while True:
@@ -1289,12 +1377,26 @@ def run_execution_pipeline(cfg: AppConfig, logger, model_path: str | None):
                 )
                 cycle_log = _build_runtime_cycle_log(cfg, live_context, vote_info, action, result)
                 logger.info("Ciclo runtime HL | %s", json.dumps(cycle_log, ensure_ascii=False))
-            except Exception:
+                _handle_runtime_side_effects(cfg, result, logger, notifier=notifier)
+            except Exception as exc:
                 pause_seconds = max(1.0, float(cfg.execution.pause_on_error_seconds))
                 logger.exception(
                     "Erro no ciclo do runtime Hyperliquid; pausando %.1fs antes de tentar novamente.",
                     pause_seconds,
                 )
+                if notifier is not None:
+                    now = time.time()
+                    error_signature = f"{type(exc).__name__}:{exc}"
+                    if (
+                        error_signature != last_runtime_error_signature
+                        or (now - last_runtime_error_notified_at) >= max(300.0, pause_seconds * 5.0)
+                    ):
+                        notifier.notify_critical_error(
+                            "Erro no ciclo do runtime Hyperliquid",
+                            error_signature,
+                        )
+                        last_runtime_error_signature = error_signature
+                        last_runtime_error_notified_at = now
                 time.sleep(pause_seconds)
                 continue
 
@@ -1617,41 +1719,54 @@ def main():
 
     logger = setup_logger(cfg.app_name, cfg.paths.logs_dir)
     cfg = apply_cli_runtime_overrides(cfg, args, logger)
-    logger.info("Iniciando pipeline com comando: %s", args.command)
+    notifier = TelegramNotifier(logger=logger)
 
-    if args.command == "train":
-        if cfg.ablation.enabled:
-            train_ablation_pipeline(cfg, logger)
+    try:
+        create_tables()
+        logger.info("Tabelas PostgreSQL verificadas/inicializadas com sucesso.")
+        notifier.notify_startup()
+
+        logger.info("Iniciando pipeline com comando: %s", args.command)
+
+        if args.command == "train":
+            if cfg.ablation.enabled:
+                train_ablation_pipeline(cfg, logger)
+            else:
+                train_pipeline(cfg, logger)
+        elif args.command == "train-multi":
+            seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
+            if not seeds:
+                raise ValueError("Nenhuma seed válida informada em --seeds")
+            if cfg.ablation.enabled:
+                train_ablation_pipeline(cfg, logger, seeds=seeds)
+            else:
+                train_multi_pipeline(cfg, logger, seeds)
+        elif args.command == "backtest":
+            backtest_pipeline(cfg, logger, args.model_path)
+        elif args.command == "run":
+            run_execution_pipeline(cfg, logger, args.model_path, notifier=notifier)
+        elif args.command == "check-hyperliquid":
+            check_hyperliquid_pipeline(cfg, logger)
+        elif args.command == "close-hyperliquid-position":
+            close_hyperliquid_position_pipeline(cfg, logger)
+        elif args.command == "smoke-hyperliquid":
+            smoke_hyperliquid_pipeline(
+                cfg,
+                logger,
+                side=args.side,
+                wait_seconds=args.wait_seconds,
+                order_slippage=args.smoke_slippage,
+                network_override=args.network,
+                allow_mainnet=bool(args.allow_mainnet),
+            )
         else:
-            train_pipeline(cfg, logger)
-    elif args.command == "train-multi":
-        seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
-        if not seeds:
-            raise ValueError("Nenhuma seed válida informada em --seeds")
-        if cfg.ablation.enabled:
-            train_ablation_pipeline(cfg, logger, seeds=seeds)
-        else:
-            train_multi_pipeline(cfg, logger, seeds)
-    elif args.command == "backtest":
-        backtest_pipeline(cfg, logger, args.model_path)
-    elif args.command == "run":
-        run_execution_pipeline(cfg, logger, args.model_path)
-    elif args.command == "check-hyperliquid":
-        check_hyperliquid_pipeline(cfg, logger)
-    elif args.command == "close-hyperliquid-position":
-        close_hyperliquid_position_pipeline(cfg, logger)
-    elif args.command == "smoke-hyperliquid":
-        smoke_hyperliquid_pipeline(
-            cfg,
-            logger,
-            side=args.side,
-            wait_seconds=args.wait_seconds,
-            order_slippage=args.smoke_slippage,
-            network_override=args.network,
-            allow_mainnet=bool(args.allow_mainnet),
+            raise ValueError("Comando inválido")
+    except Exception as exc:
+        notifier.notify_critical_error(
+            "Falha critica no arranque/execucao do Traderbot",
+            f"{type(exc).__name__}: {exc}",
         )
-    else:
-        raise ValueError("Comando inválido")
+        raise
 
 
 if __name__ == "__main__":

@@ -755,11 +755,22 @@ class HyperliquidExecutor:
                 "error": "Hyperliquid exchange is not initialized for close.",
             }
 
+        entry_price = float(snapshot.get("avg_entry_price", 0.0) or 0.0)
+        volume = float(snapshot.get("volume", 0.0) or 0.0)
+        side = int(snapshot.get("side", 0) or 0)
+        gross_pnl = None
+        estimated_close_cost = None
+        estimated_pnl = None
+        if side != 0 and entry_price > 0 and volume > 0:
+            gross_pnl = (price - entry_price) * side * self._trade_units(volume)
+            estimated_close_cost = self._estimate_cost(price, volume)
+            estimated_pnl = gross_pnl - estimated_close_cost
+
         response = self._call_with_retry(
             "market_close",
             lambda: self.exchange.market_close(
                 str(self.hl_cfg.symbol),
-                sz=float(snapshot["volume"]),
+                sz=volume,
                 px=price,
                 slippage=float(self.order_slippage),
             ),
@@ -769,13 +780,27 @@ class HyperliquidExecutor:
             self.live_entry_opened_at = None
             self.live_entry_distance_from_ema_240 = 0.0
             self._set_trade_cooldown("live")
+        final_snapshot = self.get_position_snapshot()
+        closed_position = bool(self._response_ok(response)) and int(final_snapshot.get("side", 0) or 0) == 0
         return {
             "ok": self._response_ok(response),
+            "closed_position": closed_position,
             "mode": self._operational_mode_label(),
             "timestamp": timestamp,
             "trigger": trigger,
             "response": response,
-            "position_snapshot": self.get_position_snapshot(),
+            "close_event": {
+                "closed": closed_position,
+                "side": side,
+                "entry_price": entry_price,
+                "exit_price": float(price),
+                "volume": volume,
+                "gross_pnl": gross_pnl,
+                "close_cost": estimated_close_cost,
+                "pnl": estimated_pnl,
+                "trigger": trigger,
+            },
+            "position_snapshot": final_snapshot,
         }
 
     def _maybe_close_live_position(self, timestamp: str) -> dict | None:
@@ -998,6 +1023,7 @@ class HyperliquidExecutor:
                     "sizing": None,
                     "entry_cost": 0.0,
                     "opened_position": False,
+                    "closed_position": bool(stop_take_event.get("closed", False)),
                     "open_price": None,
                     "exit_reason": stop_take_event.get("trigger"),
                     "paper_balance": self.paper_balance,
@@ -1327,14 +1353,19 @@ class HyperliquidExecutor:
             1 if trade_direction == "BUY" else -1,
         )
 
+        final_snapshot = self.get_position_snapshot()
+        opened_position = bool(self._response_ok(response)) and int(final_snapshot.get("side", 0) or 0) != 0
+
         return enrich_with_sizing({
             "ok": self._response_ok(response),
             "volume": volume,
             "position_size": volume,
             "sizing": sizing,
             "risk_state": risk_state,
+            "opened_position": opened_position,
+            "open_price": float(price),
             "stop_loss_price": stop_loss_price,
             "take_profit_price": take_profit_price,
             "response": response,
-            "position_snapshot": self.get_position_snapshot(),
+            "position_snapshot": final_snapshot,
         }, sizing=sizing, balance_context=sizing_context)
