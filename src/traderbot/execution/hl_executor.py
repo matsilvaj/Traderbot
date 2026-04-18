@@ -10,7 +10,18 @@ from typing import Callable, Optional, TypeVar
 
 import pandas as pd
 import requests
-from tenacity import RetryCallState, Retrying, retry_if_exception, stop_after_attempt, wait_exponential
+
+try:
+    from tenacity import RetryCallState, Retrying, retry_if_exception, stop_after_attempt, wait_exponential
+
+    TENACITY_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency fallback
+    RetryCallState = object  # type: ignore[assignment]
+    Retrying = None  # type: ignore[assignment]
+    retry_if_exception = None  # type: ignore[assignment]
+    stop_after_attempt = None  # type: ignore[assignment]
+    wait_exponential = None  # type: ignore[assignment]
+    TENACITY_AVAILABLE = False
 
 from traderbot.config import EnvironmentConfig, ExecutionConfig, HyperliquidConfig, TIMEFRAME_MINUTES_MAP
 from traderbot.data.hl_loader import HLDataLoader
@@ -201,6 +212,15 @@ class HyperliquidExecutor:
             float(getattr(self.exec_cfg, "api_retry_max_delay_seconds", max(base_delay * 4.0, 8.0))),
         )
 
+        if not TENACITY_AVAILABLE:
+            return self._call_with_retry_fallback(
+                label=label,
+                fn=fn,
+                attempts=attempts,
+                base_delay=base_delay,
+                max_delay=max_delay,
+            )
+
         retrying = Retrying(
             reraise=True,
             stop=stop_after_attempt(attempts),
@@ -217,6 +237,46 @@ class HyperliquidExecutor:
                     f"{label} failed after {attempts} attempt(s) with exponential backoff: {exc}"
                 ) from exc
             raise RuntimeError(f"{label} failed without retry because the error is not transient: {exc}") from exc
+
+    def _call_with_retry_fallback(
+        self,
+        *,
+        label: str,
+        fn: Callable[[], T],
+        attempts: int,
+        base_delay: float,
+        max_delay: float,
+    ) -> T:
+        last_exc: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                return fn()
+            except Exception as exc:  # pragma: no cover - depends on runtime API failures
+                last_exc = exc
+                if not self._is_retryable_network_error(exc):
+                    raise RuntimeError(
+                        f"{label} failed without retry because the error is not transient: {exc}"
+                    ) from exc
+
+                if attempt >= attempts:
+                    break
+
+                sleep_seconds = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                LOGGER.warning(
+                    "API transient failure on %s | attempt=%s/%s | retry_in=%.1fs | backend=fallback | error=%s: %s",
+                    label,
+                    attempt,
+                    attempts,
+                    sleep_seconds,
+                    type(exc).__name__,
+                    exc,
+                )
+                time.sleep(sleep_seconds)
+
+        raise RuntimeError(
+            f"{label} failed after {attempts} attempt(s) with exponential backoff: {last_exc}"
+        ) from last_exc
 
     def _can_send_now(self) -> bool:
         elapsed = time.time() - self.last_order_ts
