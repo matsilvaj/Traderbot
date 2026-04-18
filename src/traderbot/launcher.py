@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
 )
 
 from traderbot.config import AppConfig, EnvironmentConfig, load_config
-from traderbot.launcher_ai import OpenAILogTranslator
 from traderbot.launcher_services import HumanizedEvent, LauncherEvent
 
 
@@ -49,10 +48,10 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config.yaml"
 LAUNCHER_ICON_PATH = REPO_ROOT / "icon" / "icon.ico"
 WINDOWS_APP_ID = "traderbot.launcher.desktop"
 
-HUMANIZED_MARKET_PLACEHOLDER = "Aguardando leitura humanizada do mercado."
-HUMANIZED_MODEL_PLACEHOLDER = "Aguardando interpretacao humanizada do modelo."
-HUMANIZED_FILTERS_PLACEHOLDER = "Aguardando diagnostico humanizado dos filtros."
-HUMANIZED_EXECUTION_PLACEHOLDER = "Aguardando resumo humanizado da execucao."
+HUMANIZED_MARKET_PLACEHOLDER = "Aguardando leitura do mercado."
+HUMANIZED_MODEL_PLACEHOLDER = "Aguardando interpretação do modelo."
+HUMANIZED_FILTERS_PLACEHOLDER = "Aguardando diagnóstico dos filtros."
+HUMANIZED_EXECUTION_PLACEHOLDER = "Aguardando resumo da execução."
 
 
 def _currency(value: Any, prefix: str = "$") -> str:
@@ -358,27 +357,6 @@ def _set_browser_content(browser: QTextBrowser, text: str) -> None:
     browser.setPlainText(normalized)
 
 
-class TranslationSignals(QObject):
-    finished = Signal(object)
-
-
-class TranslationTask(QRunnable):
-    def __init__(self, translator: OpenAILogTranslator, event: LauncherEvent, fallback: HumanizedEvent):
-        super().__init__()
-        self.translator = translator
-        self.event = event
-        self.fallback = fallback
-        self.signals = TranslationSignals()
-
-    def run(self) -> None:
-        result = self.translator.translate(self.event, self.fallback)
-        try:
-            self.signals.finished.emit(result)
-        except RuntimeError:
-            # A janela pode ter sido fechada e destruido o QObject dono do sinal.
-            pass
-
-
 class MetricTile(QFrame):
     def __init__(
         self,
@@ -663,7 +641,7 @@ class SettingsDialog(QDialog):
             "auto_check_interval": float(self.cfg.launcher.auto_check_interval_seconds),
         }
         self.setModal(True)
-        self.setWindowTitle("Configuracoes")
+        self.setWindowTitle("Configurações")
         self.resize(620, 520)
         self.setMinimumSize(560, 480)
         self._build_ui(smoke_side=smoke_side, smoke_wait_seconds=smoke_wait_seconds)
@@ -673,12 +651,12 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(18)
 
-        title = QLabel("Configuracoes rapidas")
+        title = QLabel("Configurações rápidas")
         self.setObjectName("dialogSurface")
         title.setObjectName("dialogTitle")
         root.addWidget(title)
 
-        hint = QLabel("Ajustes operacionais do launcher. Chaves sensiveis continuam fora da interface.")
+        hint = QLabel("Ajustes operacionais do launcher. Chaves sensíveis continuam fora da interface.")
         hint.setObjectName("subtleText")
         _configure_dynamic_label(hint)
         root.addWidget(hint)
@@ -756,14 +734,9 @@ class SettingsDialog(QDialog):
         form.addWidget(self.autocheck_input, 4, 1)
 
         root.addLayout(form)
-        openai_row = QHBoxLayout()
-        openai_row.setSpacing(12)
-        openai_row.addWidget(self._field_label("Resumo inteligente via OpenAI"), 1)
-        openai_row.addWidget(self.openai_status_label, 0, Qt.AlignRight)
-        root.addLayout(openai_row)
         root.addWidget(self.api_key_hint)
 
-        self.advanced_button = QPushButton("Avancado")
+        self.advanced_button = QPushButton("Avançado")
         self.advanced_button.setCheckable(True)
         self.advanced_button.clicked.connect(self._toggle_advanced)
         root.addWidget(self.advanced_button, 0, Qt.AlignLeft)
@@ -785,7 +758,7 @@ class SettingsDialog(QDialog):
 
         footer = QHBoxLayout()
 
-        self.reset_button = QPushButton("Voltar ao padrao")
+        self.reset_button = QPushButton("Restaurar padrões")
         self.reset_button.clicked.connect(self._reset_to_defaults)
         footer.addWidget(self.reset_button)
 
@@ -802,7 +775,6 @@ class SettingsDialog(QDialog):
 
         root.addStretch(1)
         root.addLayout(footer)
-        self._refresh_openai_state()
 
     def _field_label(self, text: str) -> QLabel:
         label = QLabel(text)
@@ -814,7 +786,7 @@ class SettingsDialog(QDialog):
 
     def _toggle_advanced(self) -> None:
         expanded = self.advanced_button.isChecked()
-        self.advanced_button.setText("Ocultar avancado" if expanded else "Avancado")
+        self.advanced_button.setText("Ocultar avancado" if expanded else "Avançado")
         self.advanced_frame.setVisible(expanded)
 
     def _reset_to_defaults(self) -> None:
@@ -883,7 +855,6 @@ class TraderBotLauncher(QMainWindow):
         self._active_task_context: dict[str, Any] = {"label": None, "silent": False}
         self._notification_widgets: dict[str, NotificationItemWidget] = {}
         self._notification_order: list[str] = []
-        self._thread_pool = QThreadPool.globalInstance()
         self.state = DashboardState(network_label=self._current_mode().label.upper())
         self.health_state = OperationalHealthState()
         self.last_connection_signature: tuple[Any, ...] | None = None
@@ -895,8 +866,7 @@ class TraderBotLauncher(QMainWindow):
         self._active_toast: EventToast | None = None
         self._run_stderr_buffer = ""
         self._task_stderr_buffer = ""
-
-        self.log_translator = OpenAILogTranslator(self.cfg)
+        
 
         self.run_process = self._build_process(
             self._handle_run_output,
@@ -1262,6 +1232,11 @@ class TraderBotLauncher(QMainWindow):
 
         content_layout.addWidget(decision_card)
 
+        self.details_filters_card = DetailFieldCard("Checks dos filtros", min_height=176)
+        self.details_filters_card.set_summary("Aguardando proximo ciclo...")
+        self.details_filters_card.set_note("Os checks do HOLD, volume e distancia da EMA240 aparecerao aqui.")
+        content_layout.addWidget(self.details_filters_card)
+
         votes_card = QFrame()
         votes_card.setObjectName("PositionCard")
         votes_layout = QVBoxLayout(votes_card)
@@ -1342,12 +1317,12 @@ class TraderBotLauncher(QMainWindow):
         header.addWidget(title)
         header.addStretch(1)
 
-        self.clear_terminal_button = QPushButton("Limpar terminal")
+        self.clear_terminal_button = QPushButton("Limpar Terminal")
         self.clear_terminal_button.setObjectName("SecondaryButton")
         self.clear_terminal_button.clicked.connect(self._clear_terminal_output)
         header.addWidget(self.clear_terminal_button)
 
-        self.close_other_instances_button = QPushButton("Fechar processos orfaos")
+        self.close_other_instances_button = QPushButton("Fechar Instâncias")
         self.close_other_instances_button.setObjectName("SecondaryButton")
         self.close_other_instances_button.clicked.connect(self._close_other_instances)
         header.addWidget(self.close_other_instances_button)
@@ -1743,15 +1718,6 @@ class TraderBotLauncher(QMainWindow):
             )
             self._push_event(event)
             return False
-        if not silent:
-            event = self._new_event(
-                source="launcher",
-                event_type="generic",
-                raw_line=f"{label} iniciado.",
-                message=f"{label} iniciado.",
-                event_code="system.process_started",
-            )
-            self._push_event(event)
         self._update_controls()
         return True
 
@@ -2075,7 +2041,6 @@ class TraderBotLauncher(QMainWindow):
             yaml.safe_dump(raw, handle, sort_keys=False, allow_unicode=True)
 
         self.cfg = load_config(path)
-        self.log_translator = OpenAILogTranslator(self.cfg)
         self.health_timer.setInterval(int(self.cfg.launcher.auto_check_interval_seconds) * 1000)
         self._hydrate_static_snapshot()
         self.state.risk_label = _pct(self.cfg.environment.max_risk_per_trade)
@@ -2481,17 +2446,7 @@ class TraderBotLauncher(QMainWindow):
                     event_code="system.helper_process_failed",
                     show_dialog=not silent and not (label == "Kill switch" and self._close_after_kill_requested),
                 )
-            elif exit_code != 0 and not silent:
-                self._push_event(
-                    self._new_event(
-                        source="launcher",
-                        event_type="generic",
-                        raw_line=f"Processo auxiliar finalizado com codigo {exit_code}.",
-                        message=f"Processo auxiliar finalizado com codigo {exit_code}.",
-                        severity="warning",
-                        event_code="system.helper_process_finished",
-                    )
-                )
+        
             if self.pending_emergency_close:
                 self._execute_pending_kill_switch()
             if label == "Kill switch":
@@ -2565,15 +2520,6 @@ class TraderBotLauncher(QMainWindow):
                 self.state.last_decision = "Runtime iniciado. Aguardando proximo ciclo."
                 self._update_controls()
                 self._refresh_dashboard()
-
-            event = self._new_event(
-                source=source,
-                event_type="generic",
-                raw_line=line,
-                message=plain,
-                event_code="system.raw_log",
-            )
-            self._push_event(event)
 
         self._guard_launcher_action(f"parse de linha ({source})", _consume)
 
@@ -2679,10 +2625,14 @@ class TraderBotLauncher(QMainWindow):
         should_notify = not bool(self._active_task_context.get("silent")) or signature != self.last_connection_signature
         self.last_connection_signature = signature
         if should_notify:
+            # ADICIONE A MENSAGEM CLARA AQUI
+            msg = "Conectado com a Hyperliquid." if (connected and can_trade) else ("Conectado, mas sem permissão de trade." if connected else "Falha de conexão com a Hyperliquid.")
+            
             event = self._new_event(
                 source=source,
                 event_type="status",
                 raw_line=json.dumps(payload, ensure_ascii=False),
+                message=msg,  # PASSE A MENSAGEM AQUI
                 payload=payload,
                 severity="info" if connected and can_trade else "warning" if connected else "error",
                 event_code="healthcheck.status",
@@ -2690,12 +2640,16 @@ class TraderBotLauncher(QMainWindow):
             self._push_event(event)
 
     def _apply_smoke_payload(self, payload: dict[str, Any], *, source: str) -> None:
+        ok = payload.get("ok")
+        msg = "Smoke test concluído com sucesso (abriu e fechou ordem)." if ok else "Falha no Smoke test."
+        
         event = self._new_event(
             source=source,
             event_type="smoke",
             raw_line=json.dumps(payload, ensure_ascii=False),
+            message=msg, # PASSE A MENSAGEM AQUI
             payload=payload,
-            severity="execution" if payload.get("ok") else "error",
+            severity="execution" if ok else "error",
             event_code="system.smoke_test",
         )
         self._push_event(event)
@@ -2716,19 +2670,47 @@ class TraderBotLauncher(QMainWindow):
             self.state.position_status = "Sem sinal ativo"
             self._refresh_dashboard()
 
+        ok = payload.get("ok")
+        msg = "Posição encerrada manualmente com sucesso." if ok else "Falha ao tentar encerrar posição manualmente."
+        
         event = self._new_event(
             source=source,
             event_type="manual_close",
             raw_line=json.dumps(payload, ensure_ascii=False),
+            message=msg, # PASSE A MENSAGEM AQUI
             payload=payload,
-            severity="risk" if payload.get("ok") else "warning",
+            severity="risk" if ok else "warning",
             event_code="risk.manual_close",
         )
         self._push_event(event)
 
     def _push_event(self, event: LauncherEvent, *, prebuilt: HumanizedEvent | None = None) -> None:
-        summary = prebuilt or self.log_translator.local.summarize(event)
+        if prebuilt is None:
+            summary = HumanizedEvent(
+                source=event.source,
+                event_type=event.event_type,
+                raw_line=event.raw_line,
+                message=event.message or "Evento do sistema",
+                payload=dict(event.payload or {}),
+                occurred_at=event.occurred_at,
+                severity=event.severity,
+                event_code=event.event_code,
+                details=event.message,
+                network=event.network,
+                symbol=event.symbol,
+                timeframe=event.timeframe,
+                color="blue",
+                relevant=True,
+                fingerprint=f"{event.event_code}:{event.message}",
+                raw_detail=event.raw_line,
+                execution_summary=event.message,
+                simple_summary=event.message,
+            )
+        else:
+            summary = prebuilt
+
         self._apply_humanized_cycle_details(summary)
+        
         if summary.relevant:
             widget, is_new = self._upsert_notification(summary)
             if is_new:
@@ -2737,10 +2719,8 @@ class TraderBotLauncher(QMainWindow):
                     self._update_navigation_state()
                     self._show_event_toast(summary)
                 self._update_events_empty_state()
-            if self.log_translator.enabled:
-                task = TranslationTask(self.log_translator, event, summary)
-                task.signals.finished.connect(lambda result, target=widget: self._apply_translated_notification(target, result))
-                self._thread_pool.start(task)
+                
+            self._apply_translated_notification(widget, summary)
 
         if summary.severity == "error":
             self.state.state_label = "ERRO"
@@ -2960,6 +2940,7 @@ class TraderBotLauncher(QMainWindow):
             "raw_actions": payload.get("raw_actions"),
             "reason": payload.get("decision_reason"),
             "final_action": final_action,
+            "action_hold_threshold": payload.get("action_hold_threshold"),
             "tie_hold": payload.get("tie_hold"),
             "confidence_pct": abs(final_action) * 100.0,
         }
@@ -2980,6 +2961,83 @@ class TraderBotLauncher(QMainWindow):
             "blocked_reason": blocked_reason,
             "blocked_reason_human": self._human_block_label(str(blocked_reason)) if blocked_reason else None,
         }
+
+    @staticmethod
+    def _filter_status_text(passed: bool | None) -> str:
+        if passed is None:
+            return "SEM DADO"
+        return "PASSOU" if passed else "FALHOU"
+
+    def _build_filter_details_summary(self) -> tuple[str, str | None]:
+        dec_snap = self.state.decision_snapshot if isinstance(self.state.decision_snapshot, dict) else {}
+        filter_snap = self.state.filter_snapshot if isinstance(self.state.filter_snapshot, dict) else {}
+        if not dec_snap and not filter_snap:
+            return "Aguardando proximo ciclo...", "Nenhum dado recebido ainda."
+
+        thresholds = filter_snap.get("regime_thresholds")
+        if not isinstance(thresholds, dict):
+            thresholds = {}
+
+        hold_threshold = _safe_float(dec_snap.get("action_hold_threshold"))
+        if hold_threshold is None:
+            hold_threshold = float(self.cfg.environment.action_hold_threshold)
+        final_action = _safe_float(dec_snap.get("final_action"))
+        hold_strength = abs(final_action) if final_action is not None else None
+        hold_passed = None if hold_strength is None else hold_strength >= hold_threshold
+
+        regime_dist_raw = _safe_float(filter_snap.get("regime_dist_ema_240"))
+        regime_dist_abs = abs(regime_dist_raw) if regime_dist_raw is not None else None
+        min_abs_dist_ema_240 = _safe_float(thresholds.get("min_abs_dist_ema_240"))
+        if min_abs_dist_ema_240 is None:
+            min_abs_dist_ema_240 = float(self.cfg.environment.regime_min_abs_dist_ema_240)
+        ema_passed = None if regime_dist_abs is None else regime_dist_abs >= min_abs_dist_ema_240
+
+        regime_vol = _safe_float(filter_snap.get("regime_vol_regime_z"))
+        min_vol_regime_z = _safe_float(thresholds.get("min_vol_regime_z"))
+        if min_vol_regime_z is None:
+            min_vol_regime_z = float(self.cfg.environment.regime_min_vol_regime_z)
+        volume_passed = None if regime_vol is None else regime_vol > min_vol_regime_z
+
+        lines = [
+            (
+                f"HOLD: abs(acao final)={_optional_number(hold_strength, digits=4)} "
+                f"({_optional_pct(hold_strength, digits=2, signed=False)}) | "
+                f"regra=>= {hold_threshold:.4f} ({_pct(hold_threshold)}) | "
+                f"{self._filter_status_text(hold_passed)}"
+            ),
+            (
+                f"Volume (vol_regime_z): valor={_optional_number(regime_vol, digits=3, signed=True)} | "
+                f"regra=> {min_vol_regime_z:.3f} | {self._filter_status_text(volume_passed)}"
+            ),
+            (
+                f"Dist EMA240: bruto={_optional_pct(regime_dist_raw, digits=2, signed=True)} | "
+                f"abs usado={_optional_pct(regime_dist_abs, digits=2, signed=False)} | "
+                f"regra=>= {_pct(min_abs_dist_ema_240)} | {self._filter_status_text(ema_passed)}"
+            ),
+        ]
+
+        failed_filters: list[str] = []
+        if hold_passed is False:
+            failed_filters.append("HOLD")
+        if volume_passed is False:
+            failed_filters.append("Volume")
+        if ema_passed is False:
+            failed_filters.append("Distancia EMA240")
+
+        blocked_reason_human = str(
+            filter_snap.get("blocked_reason_human")
+            or (self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else "")
+            or ""
+        ).strip()
+        if blocked_reason_human:
+            note = f"Bloqueio atual: {blocked_reason_human}."
+            if failed_filters:
+                note += f" Checks reprovados: {', '.join(failed_filters)}."
+            return "\n".join(lines), note
+
+        if failed_filters:
+            return "\n".join(lines), f"Checks reprovados nesta barra: {', '.join(failed_filters)}."
+        return "\n".join(lines), "Todos os checks desta barra passaram."
 
     def _apply_cycle_payload(self, payload: dict[str, Any], *, source: str) -> None:
         self._ensure_daily_rollover()
@@ -3075,39 +3133,37 @@ class TraderBotLauncher(QMainWindow):
         else:
             self.state.position_status = "Sem sinal ativo"
 
-        self._refresh_dashboard()
+        if payload.get("opened_trade"):
+            summary_text = "Posição aberta com sucesso."
+            self.state.operations_today_label = self._increment_counter_label(self.state.operations_today_label)
+            self.state.last_trade_reason_label = summary_text
+        elif payload.get("closed_trade"):
+            summary_text = "Posição fechada."
+            self.state.last_trade_reason_label = summary_text
+        elif blocked_reason:
+            summary_text = self._human_block_label(str(blocked_reason))
+            self.state.blocked_today_label = self._increment_counter_label(self.state.blocked_today_label)
+            self.state.last_skip_reason_label = summary_text
+        else:
+            summary_text = "Ciclo concluído sem novas entradas."
+            self.state.last_skip_reason_label = summary_text
 
+        self.state.last_decision = summary_text
+        self.state.state_message = summary_text
+        import time
+        self.state.last_cycle_fingerprint = f"cycle_{int(time.time())}"
+        self._refresh_dashboard()
+        
         event = self._new_event(
             source=source,
             event_type="cycle",
             raw_line=json.dumps(payload, ensure_ascii=False),
-            message=manual_protection_message or "",
+            message=summary_text,
             payload=payload,
-            severity="warning" if manual_protection_required else ("error" if payload.get("error") else "execution"),
-            event_code="risk.manual_tp_sl_required" if manual_protection_required else "execution.cycle",
+            severity="execution",
+            event_code="execution.cycle",
         )
-        summary = self.log_translator.local.summarize(event)
-        summary_text = (
-            manual_protection_message
-            or str(summary.simple_summary or "").strip()
-            or summary.message_human
-        )
-        if payload.get("opened_trade"):
-            self.state.operations_today_label = self._increment_counter_label(self.state.operations_today_label)
-            self.state.last_trade_reason_label = manual_protection_message or summary.message_human
-        elif payload.get("closed_trade"):
-            self.state.last_trade_reason_label = summary.message_human
-        elif blocked_reason:
-            self.state.blocked_today_label = self._increment_counter_label(self.state.blocked_today_label)
-            self.state.last_skip_reason_label = manual_protection_message or summary.message_human
-        else:
-            self.state.last_skip_reason_label = manual_protection_message or summary.message_human
-
-        self.state.last_decision = summary_text
-        self.state.state_message = summary_text
-        self.state.last_cycle_fingerprint = summary.fingerprint
-        self._refresh_dashboard()
-        self._push_event(event, prebuilt=summary)
+        self._push_event(event)
 
     def _refresh_dashboard(self) -> None:
         self.state.symbol_label = str(self.cfg.hyperliquid.symbol)
@@ -3180,6 +3236,10 @@ class TraderBotLauncher(QMainWindow):
 
         _fit_label_height(self.details_final_action)
         _fit_label_height(self.details_decision_reason)
+
+        filter_summary, filter_note = self._build_filter_details_summary()
+        self.details_filters_card.set_summary(filter_summary)
+        self.details_filters_card.set_note(filter_note)
 
         self.details_vote_timestamp.setText(f"Atualizado às: {self.state.last_update_label}")
 

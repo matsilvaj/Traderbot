@@ -103,9 +103,6 @@ execution:
 launcher:
   auto_check_interval_seconds: 90
   notification_limit: 80
-  openai_model: gpt-4o-mini
-  openai_timeout_seconds: 12
-  openai_api_key_env: OPENAI_API_KEY
 retraining:
   enabled: false
   interval_minutes: 60

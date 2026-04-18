@@ -1001,7 +1001,10 @@ def _close_open_position_on_shutdown(
     )
     if native_tp_sl_enabled:
         try:
-            protection_result = executor.ensure_native_tp_sl(snapshot)
+            protection_result = executor.ensure_native_tp_sl(
+                snapshot,
+                allow_existing_trigger_reconcile=False,
+            )
         except Exception as exc:
             logger.exception("Falha ao confirmar TP/SL nativo no encerramento do runtime.")
             _safe_notifier_call(
