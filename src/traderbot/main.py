@@ -3,6 +3,7 @@
 import argparse
 import gc
 import json
+import signal
 import socket
 import sys
 import time
@@ -903,6 +904,120 @@ def _runtime_event_code(result: dict[str, Any], position_side: int) -> str:
     return "runtime.no_entry"
 
 
+def _close_event_from_result(result: dict[str, Any]) -> dict[str, Any]:
+    return result.get("close_event") or result.get("stop_take_event") or {}
+
+
+def _notify_position_closed_from_result(
+    cfg: AppConfig,
+    result: dict[str, Any],
+    notifier: TelegramNotifier | None,
+) -> None:
+    if notifier is None or not bool(result.get("closed_position", False)):
+        return
+
+    close_event = _close_event_from_result(result)
+    raw_side = int(close_event.get("side", 0) or 0)
+    position_side = "long" if raw_side > 0 else ("short" if raw_side < 0 else None)
+
+    pnl_value_raw = close_event.get("pnl")
+    if pnl_value_raw in (None, ""):
+        pnl_value_raw = close_event.get("gross_pnl")
+    pnl_value = None if pnl_value_raw in (None, "") else _as_float(pnl_value_raw)
+
+    exit_price_raw = close_event.get("exit_price")
+    exit_price = None if exit_price_raw in (None, "") else _as_float(exit_price_raw)
+
+    notifier.notify_position_closed(
+        asset=str(cfg.hyperliquid.symbol).strip().upper(),
+        pnl=pnl_value,
+        side=position_side,
+        reason=str(close_event.get("trigger") or result.get("trigger") or ""),
+        exit_price=exit_price,
+    )
+
+
+def _close_open_position_on_shutdown(
+    cfg: AppConfig,
+    executor: HyperliquidExecutor,
+    logger,
+    notifier: TelegramNotifier | None,
+    trigger: str,
+) -> bool:
+    try:
+        snapshot = executor.get_position_snapshot()
+    except Exception as exc:
+        logger.exception("Falha ao consultar posicao no encerramento do runtime.")
+        if notifier is not None:
+            notifier.notify_critical_error(
+                "Falha ao verificar posicao aberta no encerramento do Traderbot",
+                f"{type(exc).__name__}: {exc}",
+                status="Offline",
+            )
+        return True
+
+    if int(snapshot.get("side", 0) or 0) == 0:
+        return False
+
+    logger.warning(
+        "Runtime encerrando com posicao aberta; tentando fechar | trigger=%s | snapshot=%s",
+        trigger,
+        json.dumps(snapshot, ensure_ascii=False),
+    )
+
+    try:
+        close_result = executor.close_open_position(trigger=trigger)
+    except Exception as exc:
+        logger.exception("Falha ao fechar posicao no encerramento do runtime.")
+        if notifier is not None:
+            notifier.notify_critical_error(
+                "Falha ao fechar posicao na parada do Traderbot",
+                f"{type(exc).__name__}: {exc}",
+                status="Offline",
+            )
+        return True
+
+    logger.info("Fechamento de seguranca do runtime | %s", json.dumps(close_result, ensure_ascii=False))
+
+    if bool(close_result.get("closed_position", False)):
+        _notify_position_closed_from_result(cfg, close_result, notifier)
+        return False
+
+    if notifier is not None:
+        notifier.notify_critical_error(
+            "Falha ao fechar posicao na parada do Traderbot",
+            str(close_result.get("error") or close_result.get("message") or "Posicao permaneceu aberta."),
+            status="Offline",
+        )
+    return True
+
+
+def _install_runtime_signal_handlers(logger) -> dict[signal.Signals, Any]:
+    previous_handlers: dict[signal.Signals, Any] = {}
+
+    def _handle_shutdown_signal(signum, _frame) -> None:
+        try:
+            signal_name = signal.Signals(signum).name
+        except ValueError:
+            signal_name = str(signum)
+        logger.warning("Sinal %s recebido; iniciando encerramento do runtime.", signal_name)
+        raise KeyboardInterrupt(f"shutdown signal {signal_name}")
+
+    for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        current_signal = getattr(signal, signal_name, None)
+        if current_signal is None:
+            continue
+        previous_handlers[current_signal] = signal.getsignal(current_signal)
+        signal.signal(current_signal, _handle_shutdown_signal)
+
+    return previous_handlers
+
+
+def _restore_runtime_signal_handlers(previous_handlers: dict[signal.Signals, Any]) -> None:
+    for current_signal, previous_handler in previous_handlers.items():
+        signal.signal(current_signal, previous_handler)
+
+
 def _handle_runtime_side_effects(
     cfg: AppConfig,
     result: dict[str, Any],
@@ -916,27 +1031,22 @@ def _handle_runtime_side_effects(
         open_side = str(result.get("trade_direction", "")).strip().lower()
         open_price = _as_float(result.get("open_price") or position_snapshot.get("avg_entry_price"))
         open_amount = _as_float(result.get("position_size", result.get("volume", result.get("adjusted_volume", 0.0))))
+        sizing = result.get("sizing") or {}
+        open_notional = _as_float(sizing.get("adjusted_notional"))
+        if open_notional <= 0 and open_price > 0 and open_amount > 0:
+            open_notional = open_price * open_amount
         if notifier is not None and open_side in {"buy", "sell"} and open_price > 0 and open_amount > 0:
             notifier.notify_order_executed(
                 asset=symbol,
                 side=open_side,
                 price=open_price,
-                quantity=open_amount,
+                quantity=open_notional if open_notional > 0 else open_amount,
+                tp=result.get("take_profit_price"),
+                sl=result.get("stop_loss_price"),
             )
 
     if bool(result.get("closed_position", False)):
-        close_event = result.get("close_event") or result.get("stop_take_event") or {}
-        raw_side = int(close_event.get("side", 0) or 0)
-        close_side = "sell" if raw_side > 0 else ("buy" if raw_side < 0 else "")
-        close_price = _as_float(close_event.get("exit_price") or result.get("reference_price"))
-        pnl_value_raw = close_event.get("pnl")
-        pnl_value = None if pnl_value_raw in (None, "") else _as_float(pnl_value_raw)
-        if notifier is not None and pnl_value is not None:
-            notifier.notify_position_closed(
-                asset=symbol,
-                pnl=pnl_value,
-                side=close_side,
-            )
+        _notify_position_closed_from_result(cfg, result, notifier)
 
 
 def _build_decision_reason(vote_info: dict[str, Any], final_action: float, hold_threshold: float) -> str:
@@ -1347,6 +1457,9 @@ def run_execution_pipeline(
     last_retrain = time.time()
     last_runtime_error_signature = ""
     last_runtime_error_notified_at = 0.0
+    shutdown_trigger = "runtime_shutdown"
+    previous_signal_handlers = _install_runtime_signal_handlers(logger)
+    shutdown_had_error = False
 
     try:
         while True:
@@ -1388,6 +1501,7 @@ def run_execution_pipeline(
                         notifier.notify_critical_error(
                             "Erro no ciclo do runtime Hyperliquid",
                             error_signature,
+                            status="Online",
                         )
                         last_runtime_error_signature = error_signature
                         last_runtime_error_notified_at = now
@@ -1406,7 +1520,22 @@ def run_execution_pipeline(
                     last_retrain = time.time()
 
             sleep_until_next_cycle(cfg.hyperliquid.timeframe)
+    except KeyboardInterrupt as exc:
+        shutdown_trigger = "shutdown_signal"
+        logger.info("Encerramento do runtime solicitado por interrupcao/sinal: %s", exc)
+        raise
+    except SystemExit:
+        shutdown_trigger = "shutdown_signal"
+        logger.info("Encerramento do runtime solicitado por SystemExit.")
+        raise
+    except Exception:
+        shutdown_trigger = "shutdown_after_error"
+        raise
     finally:
+        _restore_runtime_signal_handlers(previous_signal_handlers)
+        shutdown_had_error = _close_open_position_on_shutdown(cfg, executor, logger, notifier, shutdown_trigger)
+        if notifier is not None and shutdown_trigger != "shutdown_after_error" and not shutdown_had_error:
+            notifier.notify_stopped()
         executor.disconnect()
 
 
@@ -1569,7 +1698,11 @@ def smoke_hyperliquid_pipeline(
     return payload
 
 
-def close_hyperliquid_position_pipeline(cfg: AppConfig, logger):
+def close_hyperliquid_position_pipeline(
+    cfg: AppConfig,
+    logger,
+    notifier: TelegramNotifier | None = None,
+):
     logger.info(
         "Fechamento manual Hyperliquid | network=%s execution_mode=%s",
         cfg.hyperliquid.network,
@@ -1602,6 +1735,7 @@ def close_hyperliquid_position_pipeline(cfg: AppConfig, logger):
         "error": payload.get("error"),
     }
     logger.info("Fechamento manual Hyperliquid | %s", json.dumps(payload, ensure_ascii=False))
+    _notify_position_closed_from_result(cfg, payload, notifier)
     return payload
 
 
@@ -1722,6 +1856,7 @@ def main():
                 )
 
         if args.command == "run":
+            _acquire_bot_lock()
             notifier.notify_startup()
 
         logger.info("Iniciando pipeline com comando: %s", args.command)
@@ -1742,12 +1877,11 @@ def main():
         elif args.command == "backtest":
             backtest_pipeline(cfg, logger, args.model_path)
         elif args.command == "run":
-            _acquire_bot_lock()
             run_execution_pipeline(cfg, logger, args.model_path, notifier=notifier)
         elif args.command == "check-hyperliquid":
             check_hyperliquid_pipeline(cfg, logger)
         elif args.command == "close-hyperliquid-position":
-            close_hyperliquid_position_pipeline(cfg, logger)
+            close_hyperliquid_position_pipeline(cfg, logger, notifier=notifier)
         elif args.command == "smoke-hyperliquid":
             smoke_hyperliquid_pipeline(
                 cfg,
@@ -1764,8 +1898,11 @@ def main():
         notifier.notify_critical_error(
             "Falha critica no arranque/execucao do Traderbot",
             f"{type(exc).__name__}: {exc}",
+            status="Offline",
         )
         raise
+    except KeyboardInterrupt:
+        logger.info("Traderbot encerrado por interrupcao.")
 
 
 if __name__ == "__main__":

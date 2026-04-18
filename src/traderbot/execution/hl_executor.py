@@ -848,9 +848,7 @@ class HyperliquidExecutor:
                 "position_snapshot": self.get_position_snapshot(),
             }
 
-        result = self._close_live_position(snapshot, current_price, timestamp, trigger)
-        result["closed_position"] = bool(result.get("ok", False))
-        return result
+        return self._close_live_position(snapshot, current_price, timestamp, trigger)
 
     def run_smoke_test(self, side: str = "buy", wait_seconds: float = 3.0, order_slippage: float | None = None) -> dict:
         execution_mode = self._execution_mode()

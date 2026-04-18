@@ -8,9 +8,21 @@ import requests
 
 DEFAULT_TIMEOUT_SECONDS = 10
 
+_CLOSE_REASON_LABELS = {
+    "agent_close": "Fechamento pelo agente",
+    "manual_close": "Fechamento manual",
+    "manual_close_from_cli": "Kill switch",
+    "runtime_shutdown": "Encerramento do programa",
+    "shutdown_after_error": "Encerramento por erro",
+    "shutdown_signal": "Encerramento do programa",
+    "smoke_test_manual_close": "Fechamento do smoke test",
+    "stop_loss": "Stop Loss",
+    "take_profit": "Take Profit",
+}
+
 
 class TelegramNotifier:
-    """Envia alertas operacionais para um chat do Telegram."""
+    """Envia alertas operacionais objetivos para um chat do Telegram."""
 
     def __init__(
         self,
@@ -29,74 +41,66 @@ class TelegramNotifier:
         return bool(self.bot_token and self.chat_id)
 
     def notify_startup(self) -> bool:
-        """Notifica que o bot foi inicializado."""
-        return self._send_message(
-            "\n".join(
-                [
-                    "[Traderbot] Bot inicializado",
-                    "Status: online",
-                    "Alerta: notificações Telegram ativas",
-                ]
-            )
-        )
+        return self._send_message("Online")
 
     def notify_order_executed(
         self,
+        *,
         asset: str,
         side: str,
         price: float | int,
         quantity: float | int,
+        tp: float | int | None = None,
+        sl: float | int | None = None,
     ) -> bool:
-        """Notifica a execucao de uma nova ordem."""
-        side_label = str(side).strip().upper()
-        return self._send_message(
-            "\n".join(
-                [
-                    "[Traderbot] Nova ordem executada",
-                    f"Ativo: {asset}",
-                    f"Lado: {side_label}",
-                    f"Preco: {self._format_decimal(price)}",
-                    f"Quantidade: {self._format_decimal(quantity)}",
-                ]
-            )
-        )
+        lines = [
+            f"ENTRADA {self._normalize_entry_side_label(side)}",
+            f"Quantidade: ${self._format_brl_number(quantity, places=2)}",
+            f"Preco: ${self._format_brl_number(price, places=2)}",
+        ]
+        if tp not in (None, ""):
+            lines.append(f"TP: ${self._format_brl_number(tp, places=2)}")
+        if sl not in (None, ""):
+            lines.append(f"SL: ${self._format_brl_number(sl, places=2)}")
+
+        return self._send_message("\n".join(lines))
 
     def notify_position_closed(
         self,
+        *,
         asset: str,
-        pnl: float | int,
+        pnl: float | int | None,
         side: str | None = None,
+        reason: str | None = None,
+        exit_price: float | int | None = None,
     ) -> bool:
-        """Notifica o fecho de uma posicao com o PnL realizado."""
-        pnl_value = float(pnl)
-        pnl_label = "lucro" if pnl_value >= 0 else "prejuizo"
-
         lines = [
-            "[Traderbot] Posicao fechada",
-            f"Ativo: {asset}",
+            "POSIÇÃO FECHADA",
         ]
-        if side:
-            lines.append(f"Lado: {str(side).strip().upper()}")
-        lines.extend(
-            [
-                f"Resultado: {pnl_label}",
-                f"PnL: {self._format_decimal(pnl_value, signed=True)}",
-            ]
-        )
+
+        reason_label = self._normalize_close_reason(reason)
+        if reason_label:
+            lines.append(f"Motivo: {reason_label}")
+
+        if pnl not in (None, ""):
+            lines.append(f"PnL realizado: ${self._format_decimal(pnl, signed=True, places=2, trim=False)}")
+
         return self._send_message("\n".join(lines))
+
+    def notify_stopped(self, reason: str | None = None) -> bool:
+        return self._send_message("Offline")
 
     def notify_critical_error(
         self,
-        error_message: str,
+        error_message: str = "Erro no Traderbot",
         details: str | None = None,
+        *,
+        status: str = "Offline",
     ) -> bool:
-        """Notifica falhas criticas, como erros de API ou execucao."""
         lines = [
-            "[Traderbot] ERRO CRITICO",
-            f"Mensagem: {error_message}",
+            "ERRO",
+            f"Status: {self._normalize_runtime_status(status)}",
         ]
-        if details:
-            lines.append(f"Detalhes: {details}")
         return self._send_message("\n".join(lines))
 
     def _send_message(self, text: str) -> bool:
@@ -134,12 +138,79 @@ class TelegramNotifier:
         return True
 
     @staticmethod
-    def _format_decimal(value: float | int, signed: bool = False) -> str:
+    def _normalize_side_label(side: str | None) -> str:
+        label = str(side or "").strip().lower()
+        if label == "buy":
+            return "BUY"
+        if label == "sell":
+            return "SELL"
+        return str(side or "").strip().upper() or "ORDEM"
+
+    @staticmethod
+    def _normalize_entry_side_label(side: str | None) -> str:
+        label = str(side or "").strip().lower()
+        if label in {"buy", "long"}:
+            return "LONG"
+        if label in {"sell", "short"}:
+            return "SHORT"
+        return str(side or "").strip().upper() or "ORDEM"
+
+    @staticmethod
+    def _normalize_position_side(side: str | None) -> str:
+        label = str(side or "").strip().lower()
+        if label == "long":
+            return "LONG"
+        if label == "short":
+            return "SHORT"
+        return str(side or "").strip().upper()
+
+    @staticmethod
+    def _normalize_close_reason(reason: str | None) -> str:
+        raw_reason = str(reason or "").strip().lower()
+        if not raw_reason:
+            return ""
+        return _CLOSE_REASON_LABELS.get(raw_reason, raw_reason.replace("_", " ").title())
+
+    @staticmethod
+    def _multiply_if_possible(left: float | int, right: float | int) -> float | None:
+        try:
+            return float(left) * float(right)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _normalize_runtime_status(status: str | None) -> str:
+        label = str(status or "").strip().lower()
+        if label == "online":
+            return "Online"
+        if label == "offline":
+            return "Offline"
+        return "Offline"
+
+    @staticmethod
+    def _format_brl_number(value: float | int, *, places: int = 2) -> str:
         try:
             numeric_value = float(value)
         except (TypeError, ValueError):
             return str(value)
 
-        if signed:
-            return f"{numeric_value:+.8f}".rstrip("0").rstrip(".")
-        return f"{numeric_value:.8f}".rstrip("0").rstrip(".")
+        rendered = f"{numeric_value:,.{places}f}"
+        return rendered.replace(",", "_").replace(".", ",").replace("_", ".")
+
+    @staticmethod
+    def _format_decimal(
+        value: float | int,
+        *,
+        signed: bool = False,
+        places: int = 8,
+        trim: bool = True,
+    ) -> str:
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+        rendered = f"{numeric_value:+.{places}f}" if signed else f"{numeric_value:.{places}f}"
+        if trim:
+            return rendered.rstrip("0").rstrip(".")
+        return rendered
