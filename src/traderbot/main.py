@@ -908,9 +908,33 @@ def _close_event_from_result(result: dict[str, Any]) -> dict[str, Any]:
     return result.get("close_event") or result.get("stop_take_event") or {}
 
 
+def _safe_notifier_call(
+    logger,
+    notifier: TelegramNotifier | None,
+    method_name: str,
+    *args,
+    **kwargs,
+) -> bool:
+    if notifier is None:
+        return False
+
+    try:
+        method = getattr(notifier, method_name)
+    except AttributeError:
+        logger.error("TelegramNotifier nao possui o metodo %s.", method_name)
+        return False
+
+    try:
+        return bool(method(*args, **kwargs))
+    except Exception:
+        logger.exception("Falha ao executar notificacao Telegram (%s).", method_name)
+        return False
+
+
 def _notify_position_closed_from_result(
     cfg: AppConfig,
     result: dict[str, Any],
+    logger,
     notifier: TelegramNotifier | None,
 ) -> None:
     if notifier is None or not bool(result.get("closed_position", False)):
@@ -928,7 +952,10 @@ def _notify_position_closed_from_result(
     exit_price_raw = close_event.get("exit_price")
     exit_price = None if exit_price_raw in (None, "") else _as_float(exit_price_raw)
 
-    notifier.notify_position_closed(
+    _safe_notifier_call(
+        logger,
+        notifier,
+        "notify_position_closed",
         asset=str(cfg.hyperliquid.symbol).strip().upper(),
         pnl=pnl_value,
         side=position_side,
@@ -948,12 +975,14 @@ def _close_open_position_on_shutdown(
         snapshot = executor.get_position_snapshot()
     except Exception as exc:
         logger.exception("Falha ao consultar posicao no encerramento do runtime.")
-        if notifier is not None:
-            notifier.notify_critical_error(
-                "Falha ao verificar posicao aberta no encerramento do Traderbot",
-                f"{type(exc).__name__}: {exc}",
-                status="Offline",
-            )
+        _safe_notifier_call(
+            logger,
+            notifier,
+            "notify_critical_error",
+            "Falha ao verificar posicao aberta no encerramento do Traderbot",
+            f"{type(exc).__name__}: {exc}",
+            status="Offline",
+        )
         return True
 
     if int(snapshot.get("side", 0) or 0) == 0:
@@ -969,26 +998,30 @@ def _close_open_position_on_shutdown(
         close_result = executor.close_open_position(trigger=trigger)
     except Exception as exc:
         logger.exception("Falha ao fechar posicao no encerramento do runtime.")
-        if notifier is not None:
-            notifier.notify_critical_error(
-                "Falha ao fechar posicao na parada do Traderbot",
-                f"{type(exc).__name__}: {exc}",
-                status="Offline",
-            )
+        _safe_notifier_call(
+            logger,
+            notifier,
+            "notify_critical_error",
+            "Falha ao fechar posicao na parada do Traderbot",
+            f"{type(exc).__name__}: {exc}",
+            status="Offline",
+        )
         return True
 
     logger.info("Fechamento de seguranca do runtime | %s", json.dumps(close_result, ensure_ascii=False))
 
     if bool(close_result.get("closed_position", False)):
-        _notify_position_closed_from_result(cfg, close_result, notifier)
+        _notify_position_closed_from_result(cfg, close_result, logger, notifier)
         return False
 
-    if notifier is not None:
-        notifier.notify_critical_error(
-            "Falha ao fechar posicao na parada do Traderbot",
-            str(close_result.get("error") or close_result.get("message") or "Posicao permaneceu aberta."),
-            status="Offline",
-        )
+    _safe_notifier_call(
+        logger,
+        notifier,
+        "notify_critical_error",
+        "Falha ao fechar posicao na parada do Traderbot",
+        str(close_result.get("error") or close_result.get("message") or "Posicao permaneceu aberta."),
+        status="Offline",
+    )
     return True
 
 
@@ -1036,7 +1069,10 @@ def _handle_runtime_side_effects(
         if open_notional <= 0 and open_price > 0 and open_amount > 0:
             open_notional = open_price * open_amount
         if notifier is not None and open_side in {"buy", "sell"} and open_price > 0 and open_amount > 0:
-            notifier.notify_order_executed(
+            _safe_notifier_call(
+                logger,
+                notifier,
+                "notify_order_executed",
                 asset=symbol,
                 side=open_side,
                 price=open_price,
@@ -1046,7 +1082,7 @@ def _handle_runtime_side_effects(
             )
 
     if bool(result.get("closed_position", False)):
-        _notify_position_closed_from_result(cfg, result, notifier)
+        _notify_position_closed_from_result(cfg, result, logger, notifier)
 
 
 def _build_decision_reason(vote_info: dict[str, Any], final_action: float, hold_threshold: float) -> str:
@@ -1491,20 +1527,22 @@ def run_execution_pipeline(
                     "Erro no ciclo do runtime Hyperliquid; pausando %.1fs antes de tentar novamente.",
                     pause_seconds,
                 )
-                if notifier is not None:
-                    now = time.time()
-                    error_signature = f"{type(exc).__name__}:{exc}"
-                    if (
-                        error_signature != last_runtime_error_signature
-                        or (now - last_runtime_error_notified_at) >= max(300.0, pause_seconds * 5.0)
-                    ):
-                        notifier.notify_critical_error(
-                            "Erro no ciclo do runtime Hyperliquid",
-                            error_signature,
-                            status="Online",
-                        )
-                        last_runtime_error_signature = error_signature
-                        last_runtime_error_notified_at = now
+                now = time.time()
+                error_signature = f"{type(exc).__name__}:{exc}"
+                if (
+                    error_signature != last_runtime_error_signature
+                    or (now - last_runtime_error_notified_at) >= max(300.0, pause_seconds * 5.0)
+                ):
+                    _safe_notifier_call(
+                        logger,
+                        notifier,
+                        "notify_critical_error",
+                        "Erro no ciclo do runtime Hyperliquid",
+                        error_signature,
+                        status="Online",
+                    )
+                    last_runtime_error_signature = error_signature
+                    last_runtime_error_notified_at = now
                 time.sleep(pause_seconds)
                 continue
 
@@ -1535,7 +1573,7 @@ def run_execution_pipeline(
         _restore_runtime_signal_handlers(previous_signal_handlers)
         shutdown_had_error = _close_open_position_on_shutdown(cfg, executor, logger, notifier, shutdown_trigger)
         if notifier is not None and shutdown_trigger != "shutdown_after_error" and not shutdown_had_error:
-            notifier.notify_stopped()
+            _safe_notifier_call(logger, notifier, "notify_stopped")
         executor.disconnect()
 
 
@@ -1735,7 +1773,7 @@ def close_hyperliquid_position_pipeline(
         "error": payload.get("error"),
     }
     logger.info("Fechamento manual Hyperliquid | %s", json.dumps(payload, ensure_ascii=False))
-    _notify_position_closed_from_result(cfg, payload, notifier)
+    _notify_position_closed_from_result(cfg, payload, logger, notifier)
     return payload
 
 
@@ -1857,7 +1895,7 @@ def main():
 
         if args.command == "run":
             _acquire_bot_lock()
-            notifier.notify_startup()
+            _safe_notifier_call(logger, notifier, "notify_startup")
 
         logger.info("Iniciando pipeline com comando: %s", args.command)
 
@@ -1895,7 +1933,10 @@ def main():
         else:
             raise ValueError("Comando inválido")
     except Exception as exc:
-        notifier.notify_critical_error(
+        _safe_notifier_call(
+            logger,
+            notifier,
+            "notify_critical_error",
             "Falha critica no arranque/execucao do Traderbot",
             f"{type(exc).__name__}: {exc}",
             status="Offline",

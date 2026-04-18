@@ -175,10 +175,13 @@ class HyperliquidExecutor:
                 "Hyperliquid SDK not found. Install the dependencies from requirements.txt."
             )
 
+        execution_mode = self._execution_mode()
         self.loader.connect()
         self.info = self.loader.info
         self.paper_balance = float(self.env_cfg.initial_balance)
-        self.session_peak_balance = float(self.env_cfg.initial_balance)
+        self.session_peak_balance = (
+            float(self.env_cfg.initial_balance) if execution_mode == "paper_local" else 0.0
+        )
         self.paper_position = 0
         self.paper_entry_price = 0.0
         self.paper_volume = 0.0
@@ -195,7 +198,6 @@ class HyperliquidExecutor:
 
         wallet_address = self._clean_secret(self.hl_cfg.wallet_address)
         private_key = self._clean_secret(self.hl_cfg.private_key)
-        execution_mode = self._execution_mode()
 
         if private_key is not None:
             self.account = eth_account.Account.from_key(private_key)
@@ -423,7 +425,10 @@ class HyperliquidExecutor:
 
     def get_account_risk_state(self) -> dict:
         balance = self.get_account_balance()
-        self.session_peak_balance = max(float(self.session_peak_balance), float(balance))
+        if float(self.session_peak_balance) <= 0:
+            self.session_peak_balance = float(balance)
+        else:
+            self.session_peak_balance = max(float(self.session_peak_balance), float(balance))
         drawdown_pct = (
             (float(balance) - float(self.session_peak_balance)) / max(float(self.session_peak_balance), 1e-12)
         )
@@ -519,11 +524,15 @@ class HyperliquidExecutor:
     ) -> dict:
         spec = self.get_symbol_trading_spec()
         price = float(self._get_mid_price() if price is None else price)
-        risk_pct = float(dynamic_risk_pct)
+        desired_risk_pct = float(dynamic_risk_pct)
+        hard_cap_risk_pct = float(self.env_cfg.max_risk_per_trade)
         if defensive:
-            risk_pct *= float(self.exec_cfg.defensive_risk_multiplier)
+            defensive_multiplier = float(self.exec_cfg.defensive_risk_multiplier)
+            desired_risk_pct *= defensive_multiplier
+            hard_cap_risk_pct *= defensive_multiplier
 
-        risk_amount = balance * risk_pct
+        risk_amount = balance * desired_risk_pct
+        hard_cap_risk_amount = balance * hard_cap_risk_pct
         stop_distance_price = price * float(self.stop_loss_pct)
         contract_multiplier = max(spec.contract_size, 1.0)
         price_per_volume = price * contract_multiplier
@@ -549,10 +558,13 @@ class HyperliquidExecutor:
             adjusted_notional = minimum_viable_notional
             effective_risk = minimum_viable_risk
 
-            if minimum_viable_risk > risk_amount + 1e-12 or bool(getattr(self.env_cfg, "block_trade_on_excess_risk", False)):
+            if (
+                minimum_viable_risk > hard_cap_risk_amount + 1e-12
+                or bool(getattr(self.env_cfg, "block_trade_on_excess_risk", False))
+            ):
                 adjusted_volume = 0.0
                 blocked_by_min_notional = True
-                skipped_due_to_min_notional_risk = minimum_viable_risk > risk_amount + 1e-12
+                skipped_due_to_min_notional_risk = minimum_viable_risk > hard_cap_risk_amount + 1e-12
             else:
                 adjusted_volume = minimum_viable_volume
                 bumped_to_min_notional = True
@@ -578,8 +590,12 @@ class HyperliquidExecutor:
             ),
             "sizing_balance_used": float(balance),
             "sizing_balance_source": str(sizing_balance_source) if sizing_balance_source is not None else None,
-            "risk_pct": risk_pct,
+            "risk_pct": desired_risk_pct,
             "risk_amount": risk_amount,
+            "desired_risk_pct": desired_risk_pct,
+            "desired_risk_amount": risk_amount,
+            "hard_cap_risk_pct": hard_cap_risk_pct,
+            "hard_cap_risk_amount": hard_cap_risk_amount,
             "stop_loss_pct": self.stop_loss_pct,
             "stop_distance_price": stop_distance_price,
             "target_notional": target_notional,
@@ -596,6 +612,7 @@ class HyperliquidExecutor:
             "bumped_to_min_notional": bumped_to_min_notional,
             "effective_risk_amount": effective_risk,
             "exceeds_target_risk": exceeds_target_risk,
+            "within_hard_cap": effective_risk <= hard_cap_risk_amount + 1e-12 if hard_cap_risk_amount > 0 else False,
             "skipped_due_to_min_notional_risk": skipped_due_to_min_notional_risk,
             "leverage_configured": None,
             "leverage_applied": None,
@@ -1142,8 +1159,9 @@ class HyperliquidExecutor:
                         else ("min_notional" if bool(sizing.get("blocked_by_min_notional")) else "volume_min")
                     )
                     return enrich_with_sizing({
-                        "ok": False,
-                        "error": "Calculated entry volume is invalid.",
+                        "ok": True,
+                        "message": "Entry blocked because the minimum tradeable size would violate the allowed risk.",
+                        "error": None,
                         "blocked_reason": blocked_reason,
                         "sizing": sizing,
                         "position_snapshot": current_snapshot,
@@ -1324,8 +1342,9 @@ class HyperliquidExecutor:
                 else ("min_notional" if bool(sizing.get("blocked_by_min_notional")) else "volume_min")
             )
             return enrich_with_sizing({
-                "ok": False,
-                "error": "Calculated entry volume is invalid.",
+                "ok": True,
+                "message": "Entry blocked because the minimum tradeable size would violate the allowed risk.",
+                "error": None,
                 "blocked_reason": blocked_reason,
                 "sizing": sizing,
                 "risk_state": risk_state,

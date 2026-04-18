@@ -8,6 +8,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import traceback
 import ctypes
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -821,6 +822,10 @@ class TraderBotLauncher(QMainWindow):
         self.smoke_side = "buy"
         self.smoke_wait_seconds = 3.0
         self.pending_emergency_close = False
+        self._kill_switch_in_progress = False
+        self._close_after_kill_requested = False
+        self._force_close_armed = False
+        self._shutdown_requires_flat_position = False
         self._active_task_context: dict[str, Any] = {"label": None, "silent": False}
         self._notification_widgets: dict[str, NotificationItemWidget] = {}
         self._notification_order: list[str] = []
@@ -1287,6 +1292,11 @@ class TraderBotLauncher(QMainWindow):
         self.clear_terminal_button.setObjectName("SecondaryButton")
         self.clear_terminal_button.clicked.connect(self._clear_terminal_output)
         header.addWidget(self.clear_terminal_button)
+
+        self.close_other_instances_button = QPushButton("Fechar outras instancias")
+        self.close_other_instances_button.setObjectName("SecondaryButton")
+        self.close_other_instances_button.clicked.connect(self._close_other_instances)
+        header.addWidget(self.close_other_instances_button)
         terminal_layout.addLayout(header)
 
         hint = QLabel("Espelho bruto do stdout e stderr do runtime e dos comandos auxiliares.")
@@ -1470,33 +1480,60 @@ class TraderBotLauncher(QMainWindow):
         bot_running = self.run_process.state() != QProcess.NotRunning
         position_open = self.state.position_label in {"LONG", "SHORT"}
 
-        if bot_running and position_open:
+        if self._force_close_armed:
+            self._finalize_launcher_shutdown()
+            event.accept()
+            return
+
+        if self._kill_switch_in_progress:
+            self._close_after_kill_requested = True
+            event.ignore()
+            return
+
+        if self._close_after_kill_requested:
+            event.ignore()
+            return
+
+        if bot_running or position_open:
             answer = QMessageBox.warning(
                 self,
-                "Atenção: Posição Aberta!",
-                "Existe uma posição aberta na exchange!\n\n"
-                "Se fechar o Launcher agora, o bot irá parar e a posição ficará à deriva.\n"
-                "Deseja fechar mesmo assim?",
+                "Fechar launcher com seguranca",
+                "Fechar o launcher agora vai ativar o kill switch, parar o bot e tentar "
+                "zerar qualquer posicao aberta antes de sair.\n\n"
+                "Deseja continuar?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
+            self._close_after_kill_requested = True
+            self._shutdown_requires_flat_position = position_open
+            event.ignore()
+            self._queue_kill_switch(close_after=True)
+            return
+
+        self._finalize_launcher_shutdown()
+        event.accept()
+
+    def _finalize_launcher_shutdown(self) -> None:
+        self.health_timer.stop()
 
         # Limpar requisicoes da IA que ficaram presas na fila e dar no maximo 1 segundo para terminarem
         self._thread_pool.clear()
         self._thread_pool.waitForDone(1000)
 
-        if bot_running:
+        if self.run_process.state() != QProcess.NotRunning:
             self.run_process.terminate()
-            self.run_process.waitForFinished(2000)
+            if not self.run_process.waitForFinished(2000):
+                self.run_process.kill()
+                self.run_process.waitForFinished(1000)
 
         if self.task_process.state() != QProcess.NotRunning:
             self.task_process.terminate()
-            self.task_process.waitForFinished(2000)
-
-        event.accept()
+            if not self.task_process.waitForFinished(2000):
+                self.task_process.kill()
+                self.task_process.waitForFinished(1000)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -1541,8 +1578,10 @@ class TraderBotLauncher(QMainWindow):
         self.refresh_button.setEnabled(not task_busy)
         self.smoke_button.setEnabled(not task_busy and not run_busy)
         self.settings_button.setEnabled(not task_busy and not run_busy)
-        self.kill_button.setEnabled(not task_busy)
+        self.kill_button.setEnabled(not task_busy and not self._kill_switch_in_progress)
         self.run_button.setEnabled(run_busy or not task_busy)
+        if hasattr(self, "close_other_instances_button"):
+            self.close_other_instances_button.setEnabled(not self._kill_switch_in_progress)
         if run_busy and self.runtime_stop_requested:
             run_label = "PARANDO..."
             run_state = "stopping"
@@ -1763,6 +1802,55 @@ class TraderBotLauncher(QMainWindow):
                 exit_code=exit_code,
             )
 
+    def _report_launcher_internal_error(self, *, context: str, details: str, exc: Exception) -> None:
+        summary = f"Falha interna do launcher durante {context}: {exc}"
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self._append_terminal_output(f"\n[{timestamp}] {summary}\n{details}\n")
+
+        try:
+            event = self._new_event(
+                source="launcher",
+                event_type="generic",
+                raw_line=details,
+                message=summary,
+                payload={
+                    "context": context,
+                    "exception_type": type(exc).__name__,
+                },
+                severity="error",
+                event_code="system.launcher_internal_error",
+            )
+            prebuilt = HumanizedEvent(
+                source=event.source,
+                event_type=event.event_type,
+                raw_line=event.raw_line,
+                message=summary,
+                payload=dict(event.payload or {}),
+                occurred_at=event.occurred_at,
+                severity="error",
+                event_code=event.event_code,
+                details="O launcher capturou a excecao e permaneceu aberto.",
+                network=event.network,
+                symbol=event.symbol,
+                timeframe=event.timeframe,
+                color="red",
+                relevant=True,
+                fingerprint=f"launcher_internal:{context}:{type(exc).__name__}",
+                raw_detail=details,
+                execution_summary="Excecao interna capturada no launcher.",
+                simple_summary=summary,
+            )
+            self._push_event(event, prebuilt=prebuilt)
+        except Exception:
+            pass
+
+    def _guard_launcher_action(self, context: str, callback):
+        try:
+            return callback()
+        except Exception as exc:
+            self._report_launcher_internal_error(context=context, details=traceback.format_exc(), exc=exc)
+            return None
+
     def _sync_runtime_stopped_ui(self, *, exit_code: int, stop_requested: bool) -> None:
         self.health_state.bot_running = False
         self.health_state.executor_alive = False
@@ -1975,8 +2063,21 @@ class TraderBotLauncher(QMainWindow):
         )
         if answer != QMessageBox.Yes:
             return
+        self._queue_kill_switch(close_after=False)
+
+    def _queue_kill_switch(self, *, close_after: bool) -> None:
+        if close_after:
+            self._close_after_kill_requested = True
+
+        if self._kill_switch_in_progress:
+            self._update_controls()
+            return
+
         self.pending_emergency_close = True
+        self._kill_switch_in_progress = True
         if self.run_process.state() != QProcess.NotRunning:
+            self.runtime_stop_requested = True
+            self._update_controls()
             self.run_process.kill()
             QTimer.singleShot(900, self._execute_pending_kill_switch)
         else:
@@ -1994,7 +2095,173 @@ class TraderBotLauncher(QMainWindow):
 
         self.pending_emergency_close = False
         args = self._build_base_args(self._current_mode()) + ["close-hyperliquid-position"]
-        self._start_process(self.task_process, args, label="Kill switch", silent=False)
+        if not self._start_process(self.task_process, args, label="Kill switch", silent=False):
+            self._kill_switch_in_progress = False
+            self._close_after_kill_requested = False
+            self._shutdown_requires_flat_position = False
+            self._update_controls()
+
+    def _protected_process_ids(self) -> set[int]:
+        protected = {int(os.getpid())}
+        for process in (self.run_process, self.task_process):
+            pid = int(process.processId() or 0)
+            if pid > 0:
+                protected.add(pid)
+        return protected
+
+    def _discover_traderbot_processes(self) -> list[dict[str, Any]]:
+        repo_path = str(REPO_ROOT).replace("'", "''")
+        script = (
+            f"$repo = '{repo_path}'; "
+            "$namePattern = '^(python|pythonw|py|pyw)\\.exe$'; "
+            "$commandPattern = 'traderbot\\.(launcher|main)'; "
+            "$items = Get-CimInstance Win32_Process | Where-Object { "
+            "$_.Name -match $namePattern -and $_.CommandLine -and ("
+            "($_.CommandLine -like ('*' + $repo + '*')) -or "
+            "($_.CommandLine -match $commandPattern)) "
+            "} | Select-Object ProcessId, ParentProcessId, Name, CommandLine; "
+            "$items | ConvertTo-Json -Compress"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            fallback = "Falha ao listar outras instancias do Traderbot."
+            raise RuntimeError(self._stderr_summary_line(result.stderr or result.stdout, fallback=fallback))
+
+        payload = (result.stdout or "").strip()
+        if not payload:
+            return []
+
+        parsed = json.loads(payload)
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        if not isinstance(parsed, list):
+            return []
+        return [dict(item) for item in parsed if isinstance(item, dict)]
+
+    def _close_other_instances(self) -> None:
+        if os.name != "nt":
+            self._push_event(
+                self._new_event(
+                    source="launcher",
+                    event_type="generic",
+                    raw_line="Fechar outras instancias nao suportado fora do Windows.",
+                    message="Fechar outras instancias nao suportado fora do Windows.",
+                    severity="warning",
+                    event_code="system.close_other_instances_unsupported",
+                )
+            )
+            return
+
+        answer = QMessageBox.warning(
+            self,
+            "Fechar outras instancias",
+            "Encerrar todas as outras instancias do Traderbot e preservar esta janela?\n\n"
+            "Os processos filhos desta instancia atual tambem serao preservados.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            protected = self._protected_process_ids()
+            processes = self._discover_traderbot_processes()
+        except Exception as exc:
+            self._report_launcher_internal_error(
+                context="listar outras instancias",
+                details=traceback.format_exc(),
+                exc=exc,
+            )
+            return
+
+        candidates: list[dict[str, Any]] = []
+        for process in processes:
+            pid = int(process.get("ProcessId") or 0)
+            if pid <= 0 or pid in protected:
+                continue
+            candidates.append(process)
+
+        if not candidates:
+            self._push_event(
+                self._new_event(
+                    source="launcher",
+                    event_type="generic",
+                    raw_line="Nenhuma outra instancia do Traderbot encontrada.",
+                    message="Nenhuma outra instancia do Traderbot encontrada.",
+                    severity="info",
+                    event_code="system.close_other_instances_empty",
+                )
+            )
+            return
+
+        candidate_ids = {int(item.get("ProcessId") or 0) for item in candidates}
+        root_candidates = [
+            item
+            for item in candidates
+            if int(item.get("ParentProcessId") or 0) not in candidate_ids
+        ]
+        root_candidates.sort(
+            key=lambda item: 0 if "traderbot.launcher" in str(item.get("CommandLine") or "").lower() else 1
+        )
+
+        terminated: list[int] = []
+        failures: list[str] = []
+        for process in root_candidates:
+            pid = int(process.get("ProcessId") or 0)
+            if pid <= 0:
+                continue
+            result = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode == 0:
+                terminated.append(pid)
+                continue
+            summary = self._stderr_summary_line(
+                "\n".join(part for part in (result.stdout, result.stderr) if part),
+                fallback=f"Falha ao encerrar PID {pid}.",
+            )
+            failures.append(summary)
+
+        severity = "warning" if failures else "info"
+        message = (
+            f"Outras instancias encerradas: {len(terminated)}."
+            if terminated
+            else "Nenhuma outra instancia foi encerrada."
+        )
+        if failures:
+            message = f"{message} Falhas: {len(failures)}."
+
+        self._append_terminal_output(f"{message}\n")
+        self._push_event(
+            self._new_event(
+                source="launcher",
+                event_type="generic",
+                raw_line=json.dumps(
+                    {
+                        "terminated_pids": terminated,
+                        "failures": failures,
+                    },
+                    ensure_ascii=False,
+                ),
+                message=message,
+                payload={
+                    "terminated_pids": terminated,
+                    "failures": failures,
+                },
+                severity=severity,
+                event_code="system.close_other_instances",
+            )
+        )
 
     def _clear_terminal_output(self) -> None:
         if hasattr(self, "terminal_output"):
@@ -2009,141 +2276,192 @@ class TraderBotLauncher(QMainWindow):
         self.terminal_output.ensureCursorVisible()
 
     def _handle_run_output(self) -> None:
-        while self.run_process.canReadLine():
-            raw_payload = bytes(self.run_process.readLine()).decode("utf-8", errors="ignore")
-            self._append_terminal_output(raw_payload)
-            self._parse_line(raw_payload.rstrip("\r\n"), source="run")
+        def _consume() -> None:
+            while self.run_process.canReadLine():
+                raw_payload = bytes(self.run_process.readLine()).decode("utf-8", errors="ignore")
+                self._append_terminal_output(raw_payload)
+                self._parse_line(raw_payload.rstrip("\r\n"), source="run")
+
+        self._guard_launcher_action("leitura do stdout do runtime", _consume)
 
     def _handle_run_stderr(self) -> None:
         self._append_process_stderr(self.run_process)
 
     def _handle_task_output(self) -> None:
-        while self.task_process.canReadLine():
-            raw_payload = bytes(self.task_process.readLine()).decode("utf-8", errors="ignore")
-            self._append_terminal_output(raw_payload)
-            self._parse_line(raw_payload.rstrip("\r\n"), source="task")
+        def _consume() -> None:
+            while self.task_process.canReadLine():
+                raw_payload = bytes(self.task_process.readLine()).decode("utf-8", errors="ignore")
+                self._append_terminal_output(raw_payload)
+                self._parse_line(raw_payload.rstrip("\r\n"), source="task")
+
+        self._guard_launcher_action("leitura do stdout do processo auxiliar", _consume)
 
     def _handle_task_stderr(self) -> None:
         self._append_process_stderr(self.task_process)
 
     def _handle_run_finished(self, exit_code: int, _status) -> None:
-        self._handle_run_output()
-        run_remainder = bytes(self.run_process.readAllStandardOutput()).decode("utf-8", errors="ignore")
-        self._append_terminal_output(run_remainder)
-        for raw_line in run_remainder.splitlines():
-            self._parse_line(raw_line, source="run")
-        self._handle_run_stderr()
-        stderr_buffer = self._consume_process_stderr(self.run_process)
-        stop_requested = self.runtime_stop_requested
-        self.runtime_stop_requested = False
-        if exit_code != 0 and stderr_buffer.strip():
-            self._emit_process_error(
-                process_label="Runtime",
-                source="run",
-                exit_code=exit_code,
-                stderr_buffer=stderr_buffer,
-                event_code="system.runtime_process_failed",
-                show_dialog=True,
-            )
-        else:
-            event = self._new_event(
-                source="launcher",
-                event_type="generic",
-                raw_line=f"Runtime finalizado (exit={exit_code}).",
-                message=f"Runtime finalizado (exit={exit_code}).",
-                severity="warning" if exit_code else "info",
-                event_code="system.runtime_finished",
-            )
-            self._push_event(event)
-        self._sync_runtime_stopped_ui(exit_code=exit_code, stop_requested=stop_requested)
-
-    def _handle_task_finished(self, exit_code: int, _status) -> None:
-        self._handle_task_output()
-        task_remainder = bytes(self.task_process.readAllStandardOutput()).decode("utf-8", errors="ignore")
-        self._append_terminal_output(task_remainder)
-        for raw_line in task_remainder.splitlines():
-            self._parse_line(raw_line, source="task")
-        self._handle_task_stderr()
-        stderr_buffer = self._consume_process_stderr(self.task_process)
-        label = str(self._active_task_context.get("label") or "")
-        silent = bool(self._active_task_context.get("silent"))
-        self._update_controls()
-        if label == "Check Hyperliquid" and exit_code != 0:
-            self.health_state.last_healthcheck_at = datetime.now()
-            self.health_state.last_check_execution_ok = False
-            self._refresh_connectivity_health(emit_event=True, forced_reason="health_check_command_failed")
-        if label == "Check Hyperliquid" and self._awaiting_initial_snapshot:
-            if self._has_complete_initial_snapshot():
-                self._awaiting_initial_snapshot = False
-            elif self._initial_check_attempts < 2:
-                self._schedule_initial_check(1500)
+        def _consume() -> None:
+            self._handle_run_output()
+            run_remainder = bytes(self.run_process.readAllStandardOutput()).decode("utf-8", errors="ignore")
+            self._append_terminal_output(run_remainder)
+            for raw_line in run_remainder.splitlines():
+                self._parse_line(raw_line, source="run")
+            self._handle_run_stderr()
+            stderr_buffer = self._consume_process_stderr(self.run_process)
+            stop_requested = self.runtime_stop_requested
+            self.runtime_stop_requested = False
+            if exit_code != 0 and stderr_buffer.strip():
+                self._emit_process_error(
+                    process_label="Runtime",
+                    source="run",
+                    exit_code=exit_code,
+                    stderr_buffer=stderr_buffer,
+                    event_code="system.runtime_process_failed",
+                    show_dialog=True,
+                )
             else:
-                self._awaiting_initial_snapshot = False
-        if exit_code != 0 and stderr_buffer.strip():
-            self._emit_process_error(
-                process_label=label or "Processo auxiliar",
-                source="task",
-                exit_code=exit_code,
-                stderr_buffer=stderr_buffer,
-                event_code="system.helper_process_failed",
-                show_dialog=not silent,
-            )
-        elif exit_code != 0 and not silent:
-            self._push_event(
-                self._new_event(
+                event = self._new_event(
                     source="launcher",
                     event_type="generic",
-                    raw_line=f"Processo auxiliar finalizado com codigo {exit_code}.",
-                    message=f"Processo auxiliar finalizado com codigo {exit_code}.",
-                    severity="warning",
-                    event_code="system.helper_process_finished",
+                    raw_line=f"Runtime finalizado (exit={exit_code}).",
+                    message=f"Runtime finalizado (exit={exit_code}).",
+                    severity="warning" if exit_code else "info",
+                    event_code="system.runtime_finished",
                 )
+                self._push_event(event)
+            self._sync_runtime_stopped_ui(exit_code=exit_code, stop_requested=stop_requested)
+            if self.pending_emergency_close:
+                QTimer.singleShot(0, self._execute_pending_kill_switch)
+
+        self._guard_launcher_action("finalizacao do runtime", _consume)
+
+    def _handle_task_finished(self, exit_code: int, _status) -> None:
+        def _consume() -> None:
+            self._handle_task_output()
+            task_remainder = bytes(self.task_process.readAllStandardOutput()).decode("utf-8", errors="ignore")
+            self._append_terminal_output(task_remainder)
+            for raw_line in task_remainder.splitlines():
+                self._parse_line(raw_line, source="task")
+            self._handle_task_stderr()
+            stderr_buffer = self._consume_process_stderr(self.task_process)
+            label = str(self._active_task_context.get("label") or "")
+            silent = bool(self._active_task_context.get("silent"))
+            self._update_controls()
+            if label == "Check Hyperliquid" and exit_code != 0:
+                self.health_state.last_healthcheck_at = datetime.now()
+                self.health_state.last_check_execution_ok = False
+                self._refresh_connectivity_health(emit_event=True, forced_reason="health_check_command_failed")
+            if label == "Check Hyperliquid" and self._awaiting_initial_snapshot:
+                if self._has_complete_initial_snapshot():
+                    self._awaiting_initial_snapshot = False
+                elif self._initial_check_attempts < 2:
+                    self._schedule_initial_check(1500)
+                else:
+                    self._awaiting_initial_snapshot = False
+            if exit_code != 0 and stderr_buffer.strip():
+                self._emit_process_error(
+                    process_label=label or "Processo auxiliar",
+                    source="task",
+                    exit_code=exit_code,
+                    stderr_buffer=stderr_buffer,
+                    event_code="system.helper_process_failed",
+                    show_dialog=not silent and not (label == "Kill switch" and self._close_after_kill_requested),
+                )
+            elif exit_code != 0 and not silent:
+                self._push_event(
+                    self._new_event(
+                        source="launcher",
+                        event_type="generic",
+                        raw_line=f"Processo auxiliar finalizado com codigo {exit_code}.",
+                        message=f"Processo auxiliar finalizado com codigo {exit_code}.",
+                        severity="warning",
+                        event_code="system.helper_process_finished",
+                    )
+                )
+            if self.pending_emergency_close:
+                self._execute_pending_kill_switch()
+            if label == "Kill switch":
+                self._kill_switch_in_progress = False
+                self._update_controls()
+                if self._close_after_kill_requested:
+                    self._finalize_close_after_kill(exit_code=exit_code, stderr_buffer=stderr_buffer)
+
+        self._guard_launcher_action("finalizacao do processo auxiliar", _consume)
+
+    def _finalize_close_after_kill(self, *, exit_code: int, stderr_buffer: str) -> None:
+        position_open = self.state.position_label in {"LONG", "SHORT"}
+        if not position_open:
+            self._close_after_kill_requested = False
+            self._shutdown_requires_flat_position = False
+            self._force_close_armed = True
+            QTimer.singleShot(0, self.close)
+            return
+
+        self._close_after_kill_requested = False
+        self._shutdown_requires_flat_position = False
+        fallback = "Kill switch executado, mas a posicao ainda aparece aberta. O launcher permanecera aberto."
+        summary = fallback
+        if exit_code != 0 and stderr_buffer.strip():
+            summary = self._stderr_summary_line(stderr_buffer, fallback=fallback)
+
+        self._append_terminal_output(f"{summary}\n")
+        self._push_event(
+            self._new_event(
+                source="launcher",
+                event_type="generic",
+                raw_line=stderr_buffer or summary,
+                message=summary,
+                severity="error",
+                event_code="risk.close_after_kill_blocked",
             )
-        if self.pending_emergency_close:
-            self._execute_pending_kill_switch()
+        )
+        QMessageBox.critical(self, "Kill switch incompleto", summary)
 
     def _parse_line(self, raw_line: str, source: str) -> None:
-        line = raw_line.strip()
-        if not line:
-            return
+        def _consume() -> None:
+            line = raw_line.strip()
+            if not line:
+                return
 
-        status_payload = _json_marker(line, "Status Hyperliquid: ")
-        if status_payload is not None:
-            self._apply_status_payload(status_payload, source=source)
-            return
+            status_payload = _json_marker(line, "Status Hyperliquid: ")
+            if status_payload is not None:
+                self._apply_status_payload(status_payload, source=source)
+                return
 
-        cycle_payload = _json_marker(line, "Ciclo runtime HL | ")
-        if cycle_payload is not None:
-            self._apply_cycle_payload(cycle_payload, source=source)
-            return
+            cycle_payload = _json_marker(line, "Ciclo runtime HL | ")
+            if cycle_payload is not None:
+                self._apply_cycle_payload(cycle_payload, source=source)
+                return
 
-        smoke_payload = _json_marker(line, "Smoke test Hyperliquid | ")
-        if smoke_payload is not None:
-            self._apply_smoke_payload(smoke_payload, source=source)
-            return
+            smoke_payload = _json_marker(line, "Smoke test Hyperliquid | ")
+            if smoke_payload is not None:
+                self._apply_smoke_payload(smoke_payload, source=source)
+                return
 
-        close_payload = _json_marker(line, "Fechamento manual Hyperliquid | ")
-        if close_payload is not None:
-            self._apply_manual_close_payload(close_payload, source=source)
-            return
+            close_payload = _json_marker(line, "Fechamento manual Hyperliquid | ")
+            if close_payload is not None:
+                self._apply_manual_close_payload(close_payload, source=source)
+                return
 
-        plain = self._strip_prefix(line)
-        if "Iniciando pipeline com comando: run" in plain:
-            self.state.state_label = "RODANDO"
-            self.state.state_message = "Runtime ativo. Aguardando proximo ciclo."
-            self.state.state_style = "wait"
-            self.state.last_decision = "Runtime iniciado. Aguardando proximo ciclo."
-            self._update_controls()
-            self._refresh_dashboard()
+            plain = self._strip_prefix(line)
+            if "Iniciando pipeline com comando: run" in plain:
+                self.state.state_label = "RODANDO"
+                self.state.state_message = "Runtime ativo. Aguardando proximo ciclo."
+                self.state.state_style = "wait"
+                self.state.last_decision = "Runtime iniciado. Aguardando proximo ciclo."
+                self._update_controls()
+                self._refresh_dashboard()
 
-        event = self._new_event(
-            source=source,
-            event_type="generic",
-            raw_line=line,
-            message=plain,
-            event_code="system.raw_log",
-        )
-        self._push_event(event)
+            event = self._new_event(
+                source=source,
+                event_type="generic",
+                raw_line=line,
+                message=plain,
+                event_code="system.raw_log",
+            )
+            self._push_event(event)
+
+        self._guard_launcher_action(f"parse de linha ({source})", _consume)
 
     def _ensure_daily_rollover(self) -> None:
         today = date.today()
