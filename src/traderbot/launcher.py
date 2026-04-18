@@ -49,24 +49,11 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config.yaml"
 LAUNCHER_ICON_PATH = REPO_ROOT / "icon" / "icon.ico"
 WINDOWS_APP_ID = "traderbot.launcher.desktop"
 
-HUMANIZED_MARKET_PLACEHOLDER = "Aguardando leitura do mercado."
-HUMANIZED_MODEL_PLACEHOLDER = "Aguardando interpretação do modelo."
-HUMANIZED_FILTERS_PLACEHOLDER = "Aguardando diagnóstico dos filtros."
-HUMANIZED_EXECUTION_PLACEHOLDER = "Aguardando resumo da execução."
-
-
 def _currency(value: Any, prefix: str = "$") -> str:
     try:
         return f"{prefix}{float(value):,.2f}"
     except (TypeError, ValueError):
         return f"{prefix}0.00"
-
-
-def _price(value: Any) -> str:
-    try:
-        return f"${float(value):,.2f}"
-    except (TypeError, ValueError):
-        return "$0.00"
 
 
 def _pct(value: Any) -> str:
@@ -88,17 +75,6 @@ def _display_value(value: Any, fallback: str) -> str:
     if not text or text == "--":
         return fallback
     return text
-
-
-def _has_env_value(name: str) -> bool:
-    if not name:
-        return False
-    value = os.getenv(name)
-    if value is None:
-        value = os.getenv(f"\ufeff{name}")
-    if value is None:
-        return False
-    return bool(value.strip().strip("\"'"))
 
 
 def _safe_float(value: Any) -> float | None:
@@ -130,21 +106,6 @@ def _optional_price(value: Any, fallback: str = "--") -> str:
     if number is None:
         return fallback
     return f"${number:,.2f}"
-
-
-def _optional_pct(value: Any, digits: int = 2, *, signed: bool = True, fallback: str = "--") -> str:
-    number = _safe_float(value)
-    if number is None:
-        return fallback
-    sign = "+" if signed and number > 0 else ""
-    return f"{sign}{number * 100.0:.{digits}f}%"
-
-
-def _optional_ratio(value: Any, digits: int = 2, fallback: str = "--") -> str:
-    number = _safe_float(value)
-    if number is None:
-        return fallback
-    return f"{number:.{digits}f}x"
 
 
 def _json_marker(line: str, marker: str) -> dict[str, Any] | None:
@@ -267,7 +228,7 @@ class DashboardState:
     signal_label: str = "nenhum"
     direction_label: str = "nenhuma"
     strength_label: str = "--"
-    reference_price: str = "--"
+    reference_currency: str = "--"
     risk_label: str = "--"
     balance_label: str = "--"
     blocker_label: str = "Sem bloqueio"
@@ -281,13 +242,6 @@ class DashboardState:
     execution_mode_label: str = "exchange"
     operations_today_label: str = "0"
     blocked_today_label: str = "0"
-    last_trade_reason_label: str = "Nenhuma operação hoje."
-    last_skip_reason_label: str = "Nenhum bloqueio recente."
-    context_summary_label: str = HUMANIZED_MARKET_PLACEHOLDER
-    feature_summary_label: str = HUMANIZED_MODEL_PLACEHOLDER
-    humanized_market_state: str = ""
-    humanized_model_interpretation: str = ""
-    humanized_filters_diagnostic: str = ""
     humanized_execution_summary: str = ""
     humanized_simple_summary: str = ""
     last_cycle_fingerprint: str = ""
@@ -515,7 +469,7 @@ class EventDetailsDialog(QDialog):
         raw_box = QPlainTextEdit()
         raw_box.setObjectName("technicalLog")
         raw_box.setReadOnly(True)
-        raw_box.setPlainText(self.summary.message_raw or "Sem log técnico disponivel.")
+        raw_box.setPlainText(self.summary.message_raw or "Sem log técnico disponível.")
         root.addWidget(raw_box, 1)
 
         footer = QHBoxLayout()
@@ -581,15 +535,9 @@ class NotificationItemWidget(QFrame):
         self.severity_badge.setObjectName("badge")
         top.addWidget(self.severity_badge, 0, Qt.AlignLeft)
 
+        self.time_label = QLabel("--:--:--")
         self.time_label.setObjectName("metaLabel")
         top.addWidget(self.time_label)
-
-        top.addStretch(1)
-
-        self.count_label = QLabel("")
-        self.count_label.setObjectName("badge")
-        self.count_label.hide()
-        top.addWidget(self.count_label, 0, Qt.AlignRight)
 
         layout.addLayout(top)
 
@@ -886,7 +834,6 @@ class TraderBotLauncher(QMainWindow):
         self._restart_helper_started = False
         self._restart_launch_program: str | None = None
         self._restart_launch_args: list[str] = []
-        self._shutdown_requires_flat_position = False
         self._active_task_context: dict[str, Any] = {"label": None, "silent": False}
         self._notification_widgets: dict[str, NotificationItemWidget] = {}
         self._notification_order: list[str] = []
@@ -1471,73 +1418,6 @@ class TraderBotLauncher(QMainWindow):
         if hasattr(self, "notifications_layout"):
             self._trim_notifications()
 
-    def _rebuild_details_carousel(self, items_per_page: int, columns: int) -> None:
-        cards = getattr(self, "details_technical_cards", [])
-        if not hasattr(self, "details_technical_stack") or not cards:
-            return
-
-        signature = (max(1, items_per_page), max(1, columns))
-        if self._details_carousel_signature == signature and self.details_technical_stack.count():
-            self._update_details_carousel_navigation()
-            return
-
-        current_index = max(self.details_technical_stack.currentIndex(), 0)
-        while self.details_technical_stack.count():
-            page = self.details_technical_stack.widget(0)
-            page_layout = page.layout()
-            if page_layout is not None:
-                self._detach_layout_items(page_layout)
-            self.details_technical_stack.removeWidget(page)
-            page.deleteLater()
-
-        for start in range(0, len(cards), signature[0]):
-            chunk = cards[start : start + signature[0]]
-            page = QWidget()
-            page_layout = QGridLayout(page)
-            page_layout.setContentsMargins(0, 0, 0, 0)
-            page_layout.setHorizontalSpacing(14)
-            page_layout.setVerticalSpacing(14)
-            for index, card in enumerate(chunk):
-                row = index // signature[1]
-                column = index % signature[1]
-                page_layout.addWidget(card, row, column)
-            for column in range(signature[1]):
-                page_layout.setColumnStretch(column, 1)
-            self.details_technical_stack.addWidget(page)
-
-        total_pages = self.details_technical_stack.count()
-        if total_pages:
-            self.details_technical_stack.setCurrentIndex(min(current_index, total_pages - 1))
-        self._details_carousel_signature = signature
-        self._update_details_carousel_navigation()
-
-    def _show_previous_detail_card(self) -> None:
-        if not hasattr(self, "details_technical_stack"):
-            return
-        current_index = self.details_technical_stack.currentIndex()
-        if current_index > 0:
-            self.details_technical_stack.setCurrentIndex(current_index - 1)
-
-    def _show_next_detail_card(self) -> None:
-        if not hasattr(self, "details_technical_stack"):
-            return
-        current_index = self.details_technical_stack.currentIndex()
-        if current_index < self.details_technical_stack.count() - 1:
-            self.details_technical_stack.setCurrentIndex(current_index + 1)
-
-    def _update_details_carousel_navigation(self) -> None:
-        if not hasattr(self, "details_technical_stack"):
-            return
-        total_pages = self.details_technical_stack.count()
-        current_page = self.details_technical_stack.currentIndex() + 1 if total_pages else 0
-        multi_page = total_pages > 1
-        self.details_prev_button.setVisible(multi_page)
-        self.details_next_button.setVisible(multi_page)
-        self.details_carousel_label.setVisible(multi_page)
-        self.details_prev_button.setEnabled(current_page > 1)
-        self.details_next_button.setEnabled(current_page < total_pages)
-        self.details_carousel_label.setText(f"{current_page}/{total_pages}" if total_pages else "--/--")
-
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         if hasattr(self, "main_stack"):
@@ -2033,9 +1913,7 @@ class TraderBotLauncher(QMainWindow):
 
         if self.state.position_label in {"LONG", "SHORT"}:
             self.state.position_status = self._position_status_text(
-                self.state.position_label,
-                runtime_running=False,
-                native_tp_sl=self.state.native_tp_sl_status,
+                self.state.position_label
             )
         else:
             self.state.position_status = "Bot Parado"
@@ -2082,8 +1960,6 @@ class TraderBotLauncher(QMainWindow):
                 self.state.humanized_simple_summary = ""
                 self.state.humanized_execution_summary = ""
                 self.state.last_cycle_fingerprint = ""
-                if self.state.position_label not in {"LONG", "SHORT"}:
-                    self.state.position_status = "Carregando Avaliação..."
                 self._update_controls()
                 self._refresh_dashboard()
                 self._push_event(
@@ -2348,7 +2224,6 @@ class TraderBotLauncher(QMainWindow):
         if not self._start_process(self.task_process, args, label="Kill switch", silent=False):
             self._kill_switch_in_progress = False
             self._close_after_kill_requested = False
-            self._shutdown_requires_flat_position = False
             self._update_controls()
 
     def _protected_process_ids(self) -> set[int]:
@@ -2689,14 +2564,12 @@ class TraderBotLauncher(QMainWindow):
         position_open = self.state.position_label in {"LONG", "SHORT"}
         if not position_open:
             self._close_after_kill_requested = False
-            self._shutdown_requires_flat_position = False
             self._force_close_armed = True
             QTimer.singleShot(0, self.close)
             return
 
         self._close_after_kill_requested = False
-        self._shutdown_requires_flat_position = False
-        fallback = "Kill switch executado, mas a posiçao ainda aberta.."
+        fallback = "Kill switch executado, mas a posição segue aberta."
         summary = fallback
         if exit_code != 0 and stderr_buffer.strip():
             summary = self._stderr_summary_line(stderr_buffer, fallback=fallback)
@@ -2798,16 +2671,14 @@ class TraderBotLauncher(QMainWindow):
             self.state.position_size_label = _currency(
                 payload.get("position_notional_value", payload.get("position_size", 0.0))
             )
-            self.state.entry_label = _price(payload.get("position_avg_entry_price", 0.0))
-            self.state.take_profit_label = _price(payload.get("take_profit_price", 0.0))
-            self.state.stop_loss_label = _price(payload.get("stop_loss_price", 0.0))
+            self.state.entry_label = _currency(payload.get("position_avg_entry_price", 0.0))
+            self.state.take_profit_label = _currency(payload.get("take_profit_price", 0.0))
+            self.state.stop_loss_label = _currency(payload.get("stop_loss_price", 0.0))
             pnl_value = float(payload.get("position_unrealized_pnl", 0.0) or 0.0)
             self.state.pnl_label = _currency(pnl_value)
             self.state.pnl_style = "success" if pnl_value >= 0 else "error"
             self.state.position_status = self._position_status_text(
-                position_label,
-                runtime_running=runtime_running,
-                native_tp_sl=native_tp_sl,
+                self.state.position_label
             )
         else:
             self.state.position_label = "FLAT"
@@ -2824,23 +2695,9 @@ class TraderBotLauncher(QMainWindow):
             self.state.state_style = "blocked"
             if self.state.position_label in {"LONG", "SHORT"}:
                 self.state.position_status = self._position_status_text(
-                    self.state.position_label,
-                    runtime_running=False,
-                    native_tp_sl=self.state.native_tp_sl_status,
-                )
-            else:
-                self.state.position_status = "Nenhuma Ordem Aberta"
-        if connected and can_trade and not runtime_running and position_is_open:
-            self.state.position_status = self._position_status_text(
-                self.state.position_label,
-                runtime_running=False,
-                native_tp_sl=self.state.native_tp_sl_status,
+                    self.state.position_label
             )
-        self._refresh_dashboard()
-        self._refresh_connectivity_health(
-            emit_event=True,
-            forced_reason="check_hyperliquid_ok" if health_ok else "check_hyperliquid_failed",
-        )
+
         if self._has_complete_initial_snapshot():
             self._awaiting_initial_snapshot = False
 
@@ -2895,7 +2752,6 @@ class TraderBotLauncher(QMainWindow):
             self.state.state_label = "AGUARDANDO"
             self.state.state_message = "Posição encerrada manualmente."
             self.state.state_style = "wait"
-            self.state.position_status = "Nenhuma Ordem Aberta"
             self._refresh_dashboard()
 
         ok = payload.get("ok")
@@ -2946,7 +2802,6 @@ class TraderBotLauncher(QMainWindow):
                     self.unread_events += 1
                     self._update_navigation_state()
                     self._show_event_toast(summary)
-                self._update_events_empty_state()
                 
             self._apply_translated_notification(widget, summary)
 
@@ -3026,7 +2881,7 @@ class TraderBotLauncher(QMainWindow):
             widget.apply_summary(result)
             self._apply_humanized_cycle_details(result)
         except RuntimeError:
-            # O widget C++ já foi destruido pelo _trim_notifications antes da IA terminar a traducao.
+            # O widget C++ já foi destruído pelo _trim_notifications antes da IA terminar a tradução.
             # Ignoramos silenciosamente para evitar crash do PySide6.
             pass
 
@@ -3043,8 +2898,6 @@ class TraderBotLauncher(QMainWindow):
             ("humanized_market_state", result.market_state),
             ("humanized_model_interpretation", result.model_interpretation),
             ("humanized_filters_diagnostic", result.filters_diagnostic),
-            ("humanized_execution_summary", result.execution_summary),
-            ("humanized_simple_summary", result.simple_summary),
         ):
             normalized = str(value or "").strip()
             if not normalized or getattr(self.state, state_key) == normalized:
@@ -3154,7 +3007,7 @@ class TraderBotLauncher(QMainWindow):
             "low": payload.get("candle_low"),
             "close": payload.get("candle_close"),
             "volume": payload.get("candle_volume"),
-            "reference_price": payload.get("reference_price"),
+            "reference_currency": payload.get("reference_currency"),
         }
 
     def _feature_snapshot_from_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3344,8 +3197,8 @@ class TraderBotLauncher(QMainWindow):
         manual_protection_message = str(payload.get("manual_protection_message") or "").strip()
         payload_error = payload.get("error") if not silenced_cycle_issue else None
 
-        self.state.reference_price = _optional_price(
-            market_snapshot.get("reference_price", payload.get("reference_price", 0.0))
+        self.state.reference_currency = _optional_price(
+            market_snapshot.get("reference_currency", payload.get("reference_currency", 0.0))
         )
         self.state.risk_label = _pct(payload.get("dynamic_risk_pct", payload.get("risk_pct", 0.0)))
         self.state.strength_label = _strength(final_action)
@@ -3354,12 +3207,7 @@ class TraderBotLauncher(QMainWindow):
         self.state.direction_label = str(vote_bucket or "--").upper()
         self.state.balance_label = _currency(payload.get("available_to_trade", 0.0))
         self.state.blocker_label = self._human_block_label(str(blocked_reason)) if blocked_reason else "Sem bloqueio"
-        self.state.context_summary_label = HUMANIZED_MARKET_PLACEHOLDER
-        self.state.feature_summary_label = HUMANIZED_MODEL_PLACEHOLDER
         self.state.last_raw_detail = json.dumps(payload, ensure_ascii=False, indent=2)
-        self.state.humanized_market_state = ""
-        self.state.humanized_model_interpretation = ""
-        self.state.humanized_filters_diagnostic = ""
         self.state.humanized_execution_summary = ""
         self.state.humanized_simple_summary = ""
         self.state.last_cycle_fingerprint = ""
@@ -3369,9 +3217,9 @@ class TraderBotLauncher(QMainWindow):
         self.state.native_tp_sl_status = native_tp_sl
         self.state.position_label = position_label
         self.state.position_size_label = _currency(payload.get("adjusted_notional", payload.get("notional_value", 0.0)))
-        self.state.entry_label = _price(payload.get("position_avg_entry_price", 0.0))
-        self.state.take_profit_label = _price(payload.get("take_profit_price", 0.0))
-        self.state.stop_loss_label = _price(payload.get("stop_loss_price", 0.0))
+        self.state.entry_label = _currency(payload.get("position_avg_entry_price", 0.0))
+        self.state.take_profit_label = _currency(payload.get("take_profit_price", 0.0))
+        self.state.stop_loss_label = _currency(payload.get("stop_loss_price", 0.0))
         pnl_value = float(payload.get("position_unrealized_pnl", 0.0) or 0.0)
         self.state.pnl_label = _currency(pnl_value)
         self.state.pnl_style = "success" if pnl_value >= 0 else "error"
@@ -3407,9 +3255,7 @@ class TraderBotLauncher(QMainWindow):
 
         if payload.get("position_is_open"):
             self.state.position_status = self._position_status_text(
-                position_label,
-                runtime_running=True,
-                native_tp_sl=native_tp_sl,
+                self.state.position_label
             )
         elif blocked_reason:
             self.state.position_status = "Nenhuma Ordem Aberta"
@@ -3478,7 +3324,7 @@ class TraderBotLauncher(QMainWindow):
             self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else dashboard_summary,
         )
         self.reason_tile.update_tile(_display_value(reason_value, "indefinido"), tone="default")
-        self.price_tile.update_tile(self.state.reference_price, tone="default")
+        self.price_tile.update_tile(self.state.reference_currency, tone="default")
         self.risk_tile.update_tile(self.state.risk_label, tone="warning")
         self.position_tile.update_tile(_display_value(self.state.position_label, "FLAT"), tone="default")
         self.pnl_tile.update_tile(self.state.pnl_label, tone=self.state.pnl_style)
@@ -3518,7 +3364,7 @@ class TraderBotLauncher(QMainWindow):
             )
             self.details_decision_reason.setText(reason)
         else:
-            self.details_final_action.setText("Aguardando próximo ciclo...")
+            self.details_final_action.setText("Carregando...")
             self.details_decision_reason.setText("Nenhum dado recebido ainda.")
 
         _fit_label_height(self.details_final_action)
@@ -3645,24 +3491,11 @@ class TraderBotLauncher(QMainWindow):
     def _position_status_text(
         self,
         position_label: str,
-        *,
-        runtime_running: bool,
-        native_tp_sl: dict[str, Any] | None = None,
-    ) -> str:
+    ) ->str:
         if position_label not in {"LONG", "SHORT"}:
-            return "Sem sinal ativo" if runtime_running else "Bot Parado"
+            return "Nenhuma Ordem Aberta"
 
-        protection = dict(native_tp_sl or {})
-        native_enabled = bool(protection.get("enabled", False))
-        fully_protected = bool(protection.get("is_fully_protected", False))
-
-        if runtime_running:
-            if native_enabled:
-                return f"Ordem Aberta"
-    
-
-        if native_enabled:
-            return f"Ordem Aberta"
+        return "Ordem Aberta"
 
     def _human_block_label(self, reason: str) -> str:
         mapping = {
@@ -3697,7 +3530,7 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
     _launcher_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
-        # Tenta travar a porta para garantir que e a unica instância
+        # Tenta travar a porta para garantir que é a única instância
         _launcher_lock.bind(("127.0.0.1", 54321))
         # Se conseguiu, salva o PID atual no arquivo
         with open(pid_file, "w") as f:
@@ -3744,7 +3577,7 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
                 QMessageBox.critical(
                     None,
                     "Erro",
-                    f"Não foi possivel matar o processo fantasma.\nDetalhes: {e}\n\nAbra o terminal e execute 'taskkill /F /IM pythonw.exe /T ´{old_pid} e taskkill /F /IM python.exe /T {old_pid}' para encerrar manualmente."
+                    f"Não foi possivel matar o processo fantasma.\nDetalhes: {e}\n\nAbra o terminal e execute 'taskkill /F /IM pythonw.exe /T {old_pid} e taskkill /F /IM python.exe /T {old_pid}' para encerrar manualmente."
                 )
         return 1
 
