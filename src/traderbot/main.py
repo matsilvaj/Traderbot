@@ -32,6 +32,7 @@ from traderbot.rl.backtest import (
 from traderbot.rl.model_manager import RLModelManager
 from traderbot.utils.fault_logging import install_fatal_error_hooks, uninstall_fatal_error_hooks
 from traderbot.utils.logger import setup_logger
+from traderbot.utils.maintenance import cleanup_results_json_once_per_day
 from traderbot.utils.telegram_notifier import TelegramNotifier
 
 DEFAULT_MULTI_SEEDS = [1, 7, 21, 42, 84, 123, 256, 512, 999, 2004]
@@ -1576,59 +1577,69 @@ def run_execution_pipeline(
         take_profit_pct=cfg.environment.take_profit_pct,
         slippage_pct=cfg.environment.slippage_pct,
     )
-    heartbeat: RuntimeHeartbeat | None = None
-    if _runtime_guard_should_run(cfg):
-        heartbeat = RuntimeHeartbeat(cfg, logger)
-        heartbeat.start()
-        if runtime_guard_context is not None:
-            spawn_runtime_guard_process(
-                logger=logger,
-                config_path=str(runtime_guard_context.get("config_path") or "config.yaml"),
-                state_path=heartbeat.state_path,
-                network_override=runtime_guard_context.get("network_override"),
-                execution_mode_override=runtime_guard_context.get("execution_mode_override"),
-                allow_live_trading=bool(runtime_guard_context.get("allow_live_trading", False)),
-                order_slippage_override=runtime_guard_context.get("order_slippage_override"),
-            )
-
-    executor.connect()
-    if heartbeat is not None:
-        heartbeat.mark_status(
-            "running",
-            executor_connected_at=datetime.now(timezone.utc).isoformat(),
-        )
-    runtime_balance_context = executor.get_sizing_balance_context(cfg.execution.execution_mode)
-    logger.info(
-        "Executor conectado | network=%s | execution_mode=%s | base_url=%s | decision_mode=%s | modelos=%s | available_to_trade=%.2f | sizing_balance_used=%.2f | saldo_fonte=%s | order_slippage=%.4f | model_slippage=%.5f",
-        cfg.hyperliquid.network,
-        cfg.execution.execution_mode,
-        executor._base_url(),
-        cfg.execution.decision_mode,
-        cfg.execution.selected_model_names if cfg.execution.selected_model_names else "auto",
-        float(runtime_balance_context.get("available_to_trade", 0.0)),
-        float(runtime_balance_context.get("sizing_balance_used", 0.0)),
-        str(runtime_balance_context.get("sizing_balance_source")),
-        float(cfg.execution.order_slippage),
-        float(cfg.environment.slippage_pct),
+    cleanup_results_json_once_per_day(
+        results_dir=cfg.paths.results_dir,
+        state_dir=cfg.paths.logs_dir,
+        logger=logger,
     )
+    heartbeat = RuntimeHeartbeat(cfg, logger)
+    heartbeat.start()
+    if _runtime_guard_should_run(cfg) and runtime_guard_context is not None:
+        spawn_runtime_guard_process(
+            logger=logger,
+            config_path=str(runtime_guard_context.get("config_path") or "config.yaml"),
+            state_path=heartbeat.state_path,
+            network_override=runtime_guard_context.get("network_override"),
+            execution_mode_override=runtime_guard_context.get("execution_mode_override"),
+            allow_live_trading=bool(runtime_guard_context.get("allow_live_trading", False)),
+            order_slippage_override=runtime_guard_context.get("order_slippage_override"),
+        )
+
     last_retrain = time.time()
     last_runtime_error_signature = ""
     last_runtime_error_notified_at = 0.0
     shutdown_trigger = "runtime_shutdown"
-    previous_signal_handlers = _install_runtime_signal_handlers(logger)
+    previous_signal_handlers: dict[signal.Signals, Any] = {}
     shutdown_had_error = False
+    executor_connected = False
 
     try:
+        executor.connect()
+        executor_connected = True
+        heartbeat.mark_status(
+            "running",
+            executor_connected_at=datetime.now(timezone.utc).isoformat(),
+            runtime_guard_enabled=bool(_runtime_guard_should_run(cfg)),
+        )
+        runtime_balance_context = executor.get_sizing_balance_context(cfg.execution.execution_mode)
+        logger.info(
+            "Executor conectado | network=%s | execution_mode=%s | base_url=%s | decision_mode=%s | modelos=%s | available_to_trade=%.2f | sizing_balance_used=%.2f | saldo_fonte=%s | order_slippage=%.4f | model_slippage=%.5f",
+            cfg.hyperliquid.network,
+            cfg.execution.execution_mode,
+            executor._base_url(),
+            cfg.execution.decision_mode,
+            cfg.execution.selected_model_names if cfg.execution.selected_model_names else "auto",
+            float(runtime_balance_context.get("available_to_trade", 0.0)),
+            float(runtime_balance_context.get("sizing_balance_used", 0.0)),
+            str(runtime_balance_context.get("sizing_balance_source")),
+            float(cfg.execution.order_slippage),
+            float(cfg.environment.slippage_pct),
+        )
+        previous_signal_handlers = _install_runtime_signal_handlers(logger)
         while True:
             try:
+                cleanup_results_json_once_per_day(
+                    results_dir=cfg.paths.results_dir,
+                    state_dir=cfg.paths.logs_dir,
+                    logger=logger,
+                )
                 obs, live_context = build_live_observation(cfg, executor, cols, fe)
-                if heartbeat is not None:
-                    heartbeat.update(
-                        status="running",
-                        last_cycle_started_at=datetime.now(timezone.utc).isoformat(),
-                        last_bar_timestamp=str(live_context.get("bar_timestamp", "")),
-                        last_reference_price=float(live_context.get("reference_price", 0.0) or 0.0),
-                    )
+                heartbeat.update(
+                    status="running",
+                    last_cycle_started_at=datetime.now(timezone.utc).isoformat(),
+                    last_bar_timestamp=str(live_context.get("bar_timestamp", "")),
+                    last_reference_price=float(live_context.get("reference_price", 0.0) or 0.0),
+                )
                 action, vote_info = infer_latest_action_ensemble(
                     model_entries,
                     obs,
@@ -1648,16 +1659,16 @@ def run_execution_pipeline(
                 )
                 cycle_log = _build_runtime_cycle_log(cfg, live_context, vote_info, action, result)
                 logger.info("Ciclo runtime HL | %s", json.dumps(cycle_log, ensure_ascii=False))
-                if heartbeat is not None:
-                    heartbeat.update(
-                        status="running",
-                        last_cycle_completed_at=datetime.now(timezone.utc).isoformat(),
-                        last_runtime_event_code=str(cycle_log.get("event_code") or ""),
-                        last_blocked_reason=cycle_log.get("blocked_reason"),
-                        last_position_label=str(cycle_log.get("position_label") or ""),
-                        last_cycle_error=None,
-                        last_cycle_error_at=None,
-                    )
+                heartbeat.update(
+                    status="running",
+                    last_cycle_completed_at=datetime.now(timezone.utc).isoformat(),
+                    last_runtime_event_code=str(cycle_log.get("event_code") or ""),
+                    last_blocked_reason=cycle_log.get("blocked_reason"),
+                    last_position_label=str(cycle_log.get("position_label") or ""),
+                    last_cycle_error=None,
+                    last_cycle_error_at=None,
+                    last_cycle_payload=cycle_log,
+                )
                 _handle_runtime_side_effects(cfg, result, logger, notifier=notifier)
             except Exception as exc:
                 pause_seconds = max(1.0, float(cfg.execution.pause_on_error_seconds))
@@ -1667,12 +1678,11 @@ def run_execution_pipeline(
                 )
                 now = time.time()
                 error_signature = f"{type(exc).__name__}:{exc}"
-                if heartbeat is not None:
-                    heartbeat.update(
-                        status="running",
-                        last_cycle_error=error_signature,
-                        last_cycle_error_at=datetime.now(timezone.utc).isoformat(),
-                    )
+                heartbeat.update(
+                    status="running",
+                    last_cycle_error=error_signature,
+                    last_cycle_error_at=datetime.now(timezone.utc).isoformat(),
+                )
                 if (
                     error_signature != last_runtime_error_signature
                     or (now - last_runtime_error_notified_at) >= max(300.0, pause_seconds * 5.0)
@@ -1714,22 +1724,21 @@ def run_execution_pipeline(
         shutdown_trigger = "shutdown_after_error"
         raise
     finally:
-        if heartbeat is not None:
-            heartbeat.mark_status(
-                "stopping",
-                shutdown_trigger=shutdown_trigger,
-            )
+        heartbeat.mark_status(
+            "stopping",
+            shutdown_trigger=shutdown_trigger,
+        )
         _restore_runtime_signal_handlers(previous_signal_handlers)
-        shutdown_had_error = _close_open_position_on_shutdown(cfg, executor, logger, notifier, shutdown_trigger)
-        if notifier is not None and shutdown_trigger != "shutdown_after_error" and not shutdown_had_error:
-            _safe_notifier_call(logger, notifier, "notify_stopped")
+        if executor_connected:
+            shutdown_had_error = _close_open_position_on_shutdown(cfg, executor, logger, notifier, shutdown_trigger)
+            if notifier is not None and shutdown_trigger != "shutdown_after_error" and not shutdown_had_error:
+                _safe_notifier_call(logger, notifier, "notify_stopped")
         executor.disconnect()
-        if heartbeat is not None:
-            heartbeat.stop(
-                final_status="stopped_after_error" if shutdown_trigger == "shutdown_after_error" else "stopped",
-                shutdown_trigger=shutdown_trigger,
-                shutdown_close_had_error=shutdown_had_error,
-            )
+        heartbeat.stop(
+            final_status="stopped_after_error" if shutdown_trigger == "shutdown_after_error" else "stopped",
+            shutdown_trigger=shutdown_trigger,
+            shutdown_close_had_error=shutdown_had_error,
+        )
 
 
 def check_hyperliquid_pipeline(cfg: AppConfig, logger):
@@ -2059,6 +2068,11 @@ def main():
     logger = setup_logger(logger_name, cfg.paths.logs_dir)
     fault_handle = install_fatal_error_hooks(logger_name, cfg.paths.logs_dir, logger=logger)
     cfg = apply_cli_runtime_overrides(cfg, args, logger)
+    cleanup_results_json_once_per_day(
+        results_dir=cfg.paths.results_dir,
+        state_dir=cfg.paths.logs_dir,
+        logger=logger,
+    )
     notifier = TelegramNotifier(logger=logger)
 
     try:

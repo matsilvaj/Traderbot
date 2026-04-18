@@ -37,13 +37,21 @@ def resolve_logs_dir(logs_dir: str | Path) -> Path:
     return path
 
 
-def runtime_state_path(cfg: AppConfig) -> Path:
+def runtime_state_path_for(*, network: str, symbol: str, logs_dir: str | Path) -> Path:
     filename = (
         "runtime_state_"
-        f"{_safe_name_fragment(cfg.hyperliquid.network)}_"
-        f"{_safe_name_fragment(cfg.hyperliquid.symbol)}.json"
+        f"{_safe_name_fragment(network)}_"
+        f"{_safe_name_fragment(symbol)}.json"
     )
-    return resolve_logs_dir(cfg.paths.logs_dir) / filename
+    return resolve_logs_dir(logs_dir) / filename
+
+
+def runtime_state_path(cfg: AppConfig) -> Path:
+    return runtime_state_path_for(
+        network=str(cfg.hyperliquid.network),
+        symbol=str(cfg.hyperliquid.symbol),
+        logs_dir=cfg.paths.logs_dir,
+    )
 
 
 def write_runtime_state(path: Path, payload: dict[str, Any]) -> None:
@@ -199,6 +207,8 @@ def _timestamp_age_seconds(value: Any, *, now: float) -> float | None:
 
 @dataclass
 class RuntimeHeartbeat:
+    """Shared engine snapshot consumed by the runtime guard and GUI clients."""
+
     cfg: AppConfig
     logger: Any
     state_path: Path = field(init=False)
@@ -226,6 +236,7 @@ class RuntimeHeartbeat:
             "symbol": str(self.cfg.hyperliquid.symbol).upper().strip(),
             "timeframe": str(self.cfg.hyperliquid.timeframe).strip(),
             "execution_mode": str(self.cfg.execution.execution_mode).lower().strip(),
+            "last_cycle_payload": None,
         }
 
     def start(self) -> None:

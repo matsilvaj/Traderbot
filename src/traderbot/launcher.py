@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from traderbot.config import AppConfig, EnvironmentConfig, load_config
 from traderbot.launcher_services import HumanizedEvent, LauncherEvent
+from traderbot.runtime_guard import read_runtime_state, runtime_state_path_for
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -153,6 +154,16 @@ def _json_marker(line: str, marker: str) -> dict[str, Any] | None:
     try:
         return json.loads(payload)
     except json.JSONDecodeError:
+        return None
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
         return None
 
 
@@ -304,6 +315,8 @@ class OperationalHealthState:
     connection_ok: bool = False
     executor_alive: bool = False
     last_check_execution_ok: bool | None = None
+    last_runtime_state_at: datetime | None = None
+    runtime_state_ok: bool = False
     status: str = "offline"
     reason: str = "startup"
 
@@ -866,6 +879,7 @@ class TraderBotLauncher(QMainWindow):
         self._active_toast: EventToast | None = None
         self._run_stderr_buffer = ""
         self._task_stderr_buffer = ""
+        self._last_cycle_identity: str | None = None
         
 
         self.run_process = self._build_process(
@@ -896,6 +910,11 @@ class TraderBotLauncher(QMainWindow):
         self.health_timer.setInterval(int(self.cfg.launcher.auto_check_interval_seconds) * 1000)
         self.health_timer.timeout.connect(self._auto_check)
         self.health_timer.start()
+
+        self.runtime_state_timer = QTimer(self)
+        self.runtime_state_timer.setInterval(2000)
+        self.runtime_state_timer.timeout.connect(self._poll_runtime_state)
+        self.runtime_state_timer.start()
 
     def _build_process(self, output_handler, stderr_handler, finished_handler) -> QProcess:
         process = QProcess(self)
@@ -1546,6 +1565,7 @@ class TraderBotLauncher(QMainWindow):
 
     def _finalize_launcher_shutdown(self) -> None:
         self.health_timer.stop()
+        self.runtime_state_timer.stop()
 
         # Limpar requisicoes da IA que ficaram presas na fila e dar no maximo 1 segundo para terminarem
         self._thread_pool.clear()
@@ -1636,6 +1656,94 @@ class TraderBotLauncher(QMainWindow):
         if mode.allow_live_trading:
             args.append("--allow-live-trading")
         return args
+
+    def _runtime_state_path(self) -> Path:
+        return runtime_state_path_for(
+            network=self._current_mode().network,
+            symbol=str(self.cfg.hyperliquid.symbol),
+            logs_dir=self.cfg.paths.logs_dir,
+        )
+
+    def _runtime_state_stale_after_seconds(self) -> float:
+        heartbeat_interval = max(
+            5.0,
+            float(getattr(self.cfg.execution, "runtime_guard_heartbeat_interval_seconds", 15)),
+        )
+        return max(20.0, heartbeat_interval * 4.0)
+
+    @staticmethod
+    def _cycle_identity(payload: dict[str, Any]) -> str:
+        identity_payload = {
+            "bar_timestamp": payload.get("bar_timestamp"),
+            "event_code": payload.get("event_code"),
+            "position_label": payload.get("position_label"),
+            "position_is_open": payload.get("position_is_open"),
+            "opened_trade": payload.get("opened_trade"),
+            "closed_trade": payload.get("closed_trade"),
+            "blocked_reason": payload.get("blocked_reason"),
+            "manual_protection_required": payload.get("manual_protection_required"),
+            "error": payload.get("error"),
+            "final_action": payload.get("final_action"),
+        }
+        return json.dumps(identity_payload, sort_keys=True, ensure_ascii=True)
+
+    def _poll_runtime_state(self) -> None:
+        def _consume() -> None:
+            payload = read_runtime_state(self._runtime_state_path())
+            if payload is None:
+                self.health_state.runtime_state_ok = False
+                self.health_state.last_runtime_state_at = None
+                if self.run_process.state() == QProcess.NotRunning:
+                    self.health_state.bot_running = False
+                    self.health_state.executor_alive = False
+                self._refresh_connectivity_health(emit_event=False)
+                return
+
+            self._apply_runtime_state_payload(payload)
+
+        self._guard_launcher_action("leitura do estado compartilhado da engine", _consume)
+
+    def _apply_runtime_state_payload(self, payload: dict[str, Any]) -> None:
+        heartbeat_at = _parse_iso_datetime(payload.get("last_heartbeat_at")) or _parse_iso_datetime(
+            payload.get("started_at")
+        )
+        status = str(payload.get("status") or "").strip().lower()
+        if heartbeat_at is not None and heartbeat_at.tzinfo is not None:
+            now = datetime.now(heartbeat_at.tzinfo)
+        else:
+            now = datetime.now()
+        heartbeat_age = (
+            max(0.0, (now - heartbeat_at).total_seconds())
+            if heartbeat_at is not None
+            else float("inf")
+        )
+        runtime_alive = (
+            status in {"starting", "running", "guard_closing_position", "guard_close_retry_pending"}
+            and heartbeat_age <= self._runtime_state_stale_after_seconds()
+        )
+
+        self.health_state.last_runtime_state_at = heartbeat_at
+        self.health_state.runtime_state_ok = runtime_alive
+        self.health_state.bot_running = runtime_alive or self.run_process.state() != QProcess.NotRunning
+        self.health_state.executor_alive = runtime_alive
+
+        cycle_payload = payload.get("last_cycle_payload")
+        if runtime_alive and isinstance(cycle_payload, dict):
+            self._apply_cycle_payload(dict(cycle_payload), source="state")
+        elif runtime_alive and self.run_process.state() == QProcess.NotRunning:
+            state_label = "INICIANDO" if status == "starting" else "RODANDO"
+            state_message = (
+                "Engine headless ativa. Aguardando o primeiro ciclo."
+                if status == "starting"
+                else "Engine headless ativa em background."
+            )
+            if self.state.state_label != state_label or self.state.state_message != state_message:
+                self.state.state_label = state_label
+                self.state.state_message = state_message
+                self.state.state_style = "wait"
+                self._refresh_dashboard()
+
+        self._refresh_connectivity_health(emit_event=False)
 
     def _resolve_process_python_executable(self) -> str:
         executable = Path(sys.executable)
@@ -1873,6 +1981,7 @@ class TraderBotLauncher(QMainWindow):
     def _sync_runtime_stopped_ui(self, *, exit_code: int, stop_requested: bool) -> None:
         self.health_state.bot_running = False
         self.health_state.executor_alive = False
+        self.health_state.runtime_state_ok = False
 
         self._refresh_connectivity_health(emit_event=not stop_requested)
 
@@ -1890,6 +1999,7 @@ class TraderBotLauncher(QMainWindow):
         self.state.humanized_simple_summary = summary
         self.state.humanized_execution_summary = summary
         self.state.last_cycle_fingerprint = ""
+        self._last_cycle_identity = None
 
         if self.state.position_label in {"LONG", "SHORT"}:
             self.state.position_status = self._position_status_text(
@@ -1930,6 +2040,7 @@ class TraderBotLauncher(QMainWindow):
     def _toggle_run(self) -> None:
         if self.run_process.state() == QProcess.NotRunning:
             self.runtime_stop_requested = False
+            self._last_cycle_identity = None
             args = self._build_base_args(self._current_mode()) + ["run"]
             if self._start_process(self.run_process, args, label="Runtime", silent=False):
                 self.health_state.bot_running = True
@@ -1984,6 +2095,7 @@ class TraderBotLauncher(QMainWindow):
         if self.run_process.state() != QProcess.NotRunning or self.task_process.state() != QProcess.NotRunning:
             return
         self.current_mode = mode_key
+        self._last_cycle_identity = None
         self.state.network_label = self._current_mode().label.upper()
         self._sync_mode_buttons()
         self.health_state = OperationalHealthState(reason="network_switch_pending_check")
@@ -2807,7 +2919,7 @@ class TraderBotLauncher(QMainWindow):
             return
         if not result.fingerprint or result.fingerprint != self.state.last_cycle_fingerprint:
             return
-        if self.run_process.state() == QProcess.NotRunning:
+        if self.run_process.state() == QProcess.NotRunning and not self.health_state.runtime_state_ok:
             return
 
         updated = False
@@ -2856,8 +2968,10 @@ class TraderBotLauncher(QMainWindow):
                         "bot_running": self.health_state.bot_running,
                         "connection_ok": self.health_state.connection_ok,
                         "executor_alive": self.health_state.executor_alive,
+                        "runtime_state_ok": self.health_state.runtime_state_ok,
                         "last_healthcheck_at": self.health_state.last_healthcheck_at.isoformat() if self.health_state.last_healthcheck_at else None,
                         "last_successful_healthcheck_at": self.health_state.last_successful_healthcheck_at.isoformat() if self.health_state.last_successful_healthcheck_at else None,
+                        "last_runtime_state_at": self.health_state.last_runtime_state_at.isoformat() if self.health_state.last_runtime_state_at else None,
                     },
                     message=f"health_status_change | status={status} | reason={reason}",
                     severity="info" if status == "online" else "warning" if status == "warning" else "error",
@@ -2868,16 +2982,36 @@ class TraderBotLauncher(QMainWindow):
     def _derive_health_status(self, *, forced_reason: str | None = None) -> tuple[str, str]:
         state = self.health_state
         threshold = max(30, int(self.cfg.launcher.auto_check_interval_seconds) * 2)
+        runtime_threshold = self._runtime_state_stale_after_seconds()
+        runtime_age_seconds = None
+        if state.last_runtime_state_at is not None:
+            if state.last_runtime_state_at.tzinfo is not None:
+                runtime_age_seconds = (
+                    datetime.now(state.last_runtime_state_at.tzinfo) - state.last_runtime_state_at
+                ).total_seconds()
+            else:
+                runtime_age_seconds = (datetime.now() - state.last_runtime_state_at).total_seconds()
+        runtime_alive = (
+            state.runtime_state_ok
+            and runtime_age_seconds is not None
+            and runtime_age_seconds <= runtime_threshold
+        )
 
         if state.last_healthcheck_at is None:
+            if runtime_alive:
+                return "warning", forced_reason or "runtime_alive_healthcheck_pending"
             return "offline", forced_reason or "awaiting_first_healthcheck"
 
         age_seconds = (datetime.now() - state.last_healthcheck_at).total_seconds()
 
         if state.last_check_execution_ok is False and age_seconds <= threshold:
+            if runtime_alive:
+                return "warning", forced_reason or "runtime_alive_healthcheck_failed"
             return "offline", forced_reason or "health_check_command_failed"
 
         if age_seconds > threshold:
+            if runtime_alive:
+                return "warning", forced_reason or "runtime_alive_healthcheck_stale"
             return "offline", forced_reason or "health_check_stale"
 
         if state.connection_ok:
@@ -3040,9 +3174,15 @@ class TraderBotLauncher(QMainWindow):
         return "\n".join(lines), "Todos os checks desta barra passaram."
 
     def _apply_cycle_payload(self, payload: dict[str, Any], *, source: str) -> None:
+        cycle_identity = self._cycle_identity(payload)
+        if cycle_identity == self._last_cycle_identity:
+            return
+        self._last_cycle_identity = cycle_identity
+
         self._ensure_daily_rollover()
         self.health_state.bot_running = True
         self.health_state.executor_alive = True
+        self.health_state.runtime_state_ok = True
         self.state.last_update_label = datetime.now().strftime("%H:%M:%S")
 
         market_snapshot = self._market_snapshot_from_payload(payload)
@@ -3150,8 +3290,6 @@ class TraderBotLauncher(QMainWindow):
 
         self.state.last_decision = summary_text
         self.state.state_message = summary_text
-        import time
-        self.state.last_cycle_fingerprint = f"cycle_{int(time.time())}"
         self._refresh_dashboard()
         
         event = self._new_event(
@@ -3163,6 +3301,7 @@ class TraderBotLauncher(QMainWindow):
             severity="execution",
             event_code="execution.cycle",
         )
+        self.state.last_cycle_fingerprint = f"{event.event_code}:{event.message}"
         self._push_event(event)
 
     def _refresh_dashboard(self) -> None:

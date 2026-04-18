@@ -97,8 +97,9 @@ execution:
   - ppo_btc_h1_s999
   allow_live_trading: true
   min_seconds_between_orders: 10
-  api_retry_attempts: 2
-  api_retry_delay_seconds: 3
+  api_retry_attempts: 4
+  api_retry_delay_seconds: 1
+  api_retry_max_delay_seconds: 8
   pause_on_error_seconds: 60
 launcher:
   auto_check_interval_seconds: 90

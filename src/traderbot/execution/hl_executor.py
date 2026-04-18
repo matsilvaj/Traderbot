@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import ceil, floor
-from typing import Optional
+from typing import Callable, Optional, TypeVar
 
 import pandas as pd
+import requests
+from tenacity import RetryCallState, Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from traderbot.config import EnvironmentConfig, ExecutionConfig, HyperliquidConfig, TIMEFRAME_MINUTES_MAP
 from traderbot.data.hl_loader import HLDataLoader
@@ -23,6 +27,10 @@ except ImportError:  # pragma: no cover
     Exchange = None
     Info = None
     constants = None
+
+
+T = TypeVar("T")
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,6 +65,20 @@ class HyperliquidExecutor:
     DEFAULT_POINT = 1.0
     AVAILABLE_TO_TRADE_SOURCE_FIELD = "spot_user_state.tokenToAvailableAfterMaintenance[token=0]"
     AVAILABLE_TO_TRADE_FALLBACK_FIELD = "spot_user_state.balances[coin=USDC].total - hold"
+    RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504, 520, 522, 524})
+    RETRYABLE_ERROR_MARKERS = (
+        "rate limit",
+        "too many requests",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "bad gateway",
+        "gateway timeout",
+        "service unavailable",
+    )
 
     def __init__(
         self,
@@ -108,23 +130,93 @@ class HyperliquidExecutor:
 
     def _ensure_info(self) -> Info:
         if self.info is None:
-            self.loader.connect()
+            self._call_with_retry("loader_connect", self.loader.connect)
             self.info = self.loader.info
         return self.info
 
-    def _call_with_retry(self, label: str, fn):
-        attempts = max(1, int(getattr(self.exec_cfg, "api_retry_attempts", 1)))
-        delay_seconds = max(0.0, float(getattr(self.exec_cfg, "api_retry_delay_seconds", 0)))
-        last_exc: Exception | None = None
-        for attempt in range(1, attempts + 1):
+    @classmethod
+    def _extract_retryable_status_code(cls, exc: BaseException) -> int | None:
+        for candidate in (
+            getattr(exc, "status_code", None),
+            getattr(getattr(exc, "response", None), "status_code", None),
+        ):
             try:
-                return fn()
-            except Exception as exc:  # pragma: no cover - depends on runtime API failures
-                last_exc = exc
-                if attempt >= attempts:
-                    break
-                time.sleep(delay_seconds)
-        raise RuntimeError(f"{label} failed after {attempts} attempt(s): {last_exc}") from last_exc
+                if candidate is not None:
+                    return int(candidate)
+            except (TypeError, ValueError):
+                continue
+
+        match = re.search(
+            r"\b(408|425|429|500|502|503|504|520|522|524)\b",
+            str(exc),
+        )
+        return int(match.group(1)) if match else None
+
+    @classmethod
+    def _is_retryable_network_error(cls, exc: BaseException) -> bool:
+        status_code = cls._extract_retryable_status_code(exc)
+        if status_code is not None:
+            return status_code in cls.RETRYABLE_HTTP_STATUS_CODES
+
+        if isinstance(
+            exc,
+            (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.RequestException,
+                TimeoutError,
+                ConnectionError,
+            ),
+        ):
+            return True
+
+        lowered = str(exc).lower()
+        return any(marker in lowered for marker in cls.RETRYABLE_ERROR_MARKERS)
+
+    def _log_retry_attempt(self, label: str, retry_state: RetryCallState) -> None:
+        if retry_state.outcome is None:
+            return
+
+        exc = retry_state.outcome.exception()
+        if exc is None:
+            return
+
+        sleep_seconds = retry_state.next_action.sleep if retry_state.next_action is not None else 0.0
+        attempts = max(1, int(getattr(self.exec_cfg, "api_retry_attempts", 1)))
+        LOGGER.warning(
+            "API transient failure on %s | attempt=%s/%s | retry_in=%.1fs | error=%s: %s",
+            label,
+            retry_state.attempt_number,
+            attempts,
+            sleep_seconds,
+            type(exc).__name__,
+            exc,
+        )
+
+    def _call_with_retry(self, label: str, fn: Callable[[], T]) -> T:
+        attempts = max(1, int(getattr(self.exec_cfg, "api_retry_attempts", 1)))
+        base_delay = max(1.0, float(getattr(self.exec_cfg, "api_retry_delay_seconds", 1.0)))
+        max_delay = max(
+            base_delay,
+            float(getattr(self.exec_cfg, "api_retry_max_delay_seconds", max(base_delay * 4.0, 8.0))),
+        )
+
+        retrying = Retrying(
+            reraise=True,
+            stop=stop_after_attempt(attempts),
+            wait=wait_exponential(multiplier=base_delay, min=base_delay, max=max_delay),
+            retry=retry_if_exception(self._is_retryable_network_error),
+            before_sleep=lambda retry_state: self._log_retry_attempt(label, retry_state),
+        )
+
+        try:
+            return retrying(fn)
+        except Exception as exc:  # pragma: no cover - depends on runtime API failures
+            if self._is_retryable_network_error(exc):
+                raise RuntimeError(
+                    f"{label} failed after {attempts} attempt(s) with exponential backoff: {exc}"
+                ) from exc
+            raise RuntimeError(f"{label} failed without retry because the error is not transient: {exc}") from exc
 
     def _can_send_now(self) -> bool:
         elapsed = time.time() - self.last_order_ts
@@ -176,7 +268,7 @@ class HyperliquidExecutor:
             )
 
         execution_mode = self._execution_mode()
-        self.loader.connect()
+        self._call_with_retry("loader_connect", self.loader.connect)
         self.info = self.loader.info
         self.paper_balance = float(self.env_cfg.initial_balance)
         self.session_peak_balance = (
@@ -209,9 +301,15 @@ class HyperliquidExecutor:
                     "account_address": self.address,
                 }
                 if str(self.hl_cfg.network).lower().strip() == "testnet":
-                    exchange_kwargs["meta"] = self.loader._info_post(base_url, {"type": "meta"})
+                    exchange_kwargs["meta"] = self._call_with_retry(
+                        "exchange_meta",
+                        lambda: self.loader._info_post(base_url, {"type": "meta"}),
+                    )
                     exchange_kwargs["spot_meta"] = self.loader._normalize_spot_meta(
-                        self.loader._info_post(base_url, {"type": "spotMeta"})
+                        self._call_with_retry(
+                            "exchange_spot_meta",
+                            lambda: self.loader._info_post(base_url, {"type": "spotMeta"}),
+                        )
                     )
                 self.exchange = Exchange(
                     self.account,
@@ -264,7 +362,7 @@ class HyperliquidExecutor:
         return float(price)
 
     def check_connection(self) -> dict:
-        status = self.loader.check_connection()
+        status = self._call_with_retry("check_connection", self.loader.check_connection)
         status["execution_mode"] = self._execution_mode()
         status["base_url"] = self._base_url()
         status["wallet_address"] = self.address
@@ -1725,34 +1823,39 @@ class HyperliquidExecutor:
             # INÍCIO DO TP/SL NATIVO NA HYPERLIQUID
             # =========================================================
             close_is_buy = trade_direction == "SELL" # Direção oposta para fechar
-            
-            # Envia Stop Loss (Gatilho)
+
             if stop_loss_price is not None and stop_loss_price > 0:
                 try:
-                    self.exchange.order(
-                        str(self.hl_cfg.symbol),
-                        close_is_buy,
-                        volume,
-                        float(stop_loss_price),
-                        order_type={"trigger": {"triggerPx": float(stop_loss_price), "isMarket": True}},
-                        reduce_only=True
+                    self._call_with_retry(
+                        "place_native_stop_loss",
+                        lambda: self.exchange.order(
+                            str(self.hl_cfg.symbol),
+                            close_is_buy,
+                            volume,
+                            float(stop_loss_price),
+                            order_type={"trigger": {"triggerPx": float(stop_loss_price), "isMarket": True}},
+                            reduce_only=True,
+                        ),
                     )
-                except Exception:
-                    pass # Ignora falha silenciosamente (o bot continuará checando via soft-SL)
+                except Exception as exc:
+                    LOGGER.warning("Failed to place native stop loss after retries: %s", exc)
 
-            # Envia Take Profit (Gatilho)
             if take_profit_price is not None and take_profit_price > 0:
                 try:
-                    self.exchange.order(
-                        str(self.hl_cfg.symbol),
-                        close_is_buy,
-                        volume,
-                        float(take_profit_price),
-                        order_type={"trigger": {"triggerPx": float(take_profit_price), "isMarket": True}},
-                        reduce_only=True
+                    self._call_with_retry(
+                        "place_native_take_profit",
+                        lambda: self.exchange.order(
+                            str(self.hl_cfg.symbol),
+                            close_is_buy,
+                            volume,
+                            float(take_profit_price),
+                            order_type={"trigger": {"triggerPx": float(take_profit_price), "isMarket": True}},
+                            reduce_only=True,
+                        ),
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    LOGGER.warning("Failed to place native take profit after retries: %s", exc)
+            
             # =========================================================
             # FIM DO TP/SL NATIVO
             # =========================================================

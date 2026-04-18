@@ -125,8 +125,9 @@ class ExecutionConfig:
     allow_live_trading: bool = False
     exchange_native_tp_sl_enabled: bool = True
     min_seconds_between_orders: int = 10
-    api_retry_attempts: int = 2
-    api_retry_delay_seconds: int = 3
+    api_retry_attempts: int = 4
+    api_retry_delay_seconds: float = 1.0
+    api_retry_max_delay_seconds: float = 8.0
     pause_on_error_seconds: int = 60
     runtime_guard_enabled: bool = False
     runtime_guard_heartbeat_interval_seconds: int = 15
