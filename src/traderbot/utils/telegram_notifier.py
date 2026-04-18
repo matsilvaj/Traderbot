@@ -87,6 +87,28 @@ class TelegramNotifier:
 
         return self._send_message("\n".join(lines))
 
+    def notify_manual_tp_sl_required(
+        self,
+        *,
+        asset: str,
+        side: str | None = None,
+        entry_price: float | int | None = None,
+        tp: float | int | None = None,
+        sl: float | int | None = None,
+    ) -> bool:
+        lines = [
+            "ALERTA TP/SL",
+            "Não consegui criar o gatilho de SL e TP",
+            "Precisa configurar manualmente.",
+        ]
+        if entry_price not in (None, ""):
+            lines.append(f"Entrada: ${self._format_brl_number(entry_price, places=2)}")
+        if tp not in (None, ""):
+            lines.append(f"TP: 5%")
+        if sl not in (None, ""):
+            lines.append(f"SL: 2%")
+        return self._send_message("\n".join(lines))
+
     def notify_stopped(self, reason: str | None = None) -> bool:
         return self._send_message("Offline")
 

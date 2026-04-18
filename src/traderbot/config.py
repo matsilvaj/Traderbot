@@ -123,10 +123,17 @@ class ExecutionConfig:
         default_factory=lambda: ["ppo_btc_h1_s123", "ppo_btc_h1_s512", "ppo_btc_h1_s2004"]
     )
     allow_live_trading: bool = False
+    exchange_native_tp_sl_enabled: bool = True
     min_seconds_between_orders: int = 10
     api_retry_attempts: int = 2
     api_retry_delay_seconds: int = 3
     pause_on_error_seconds: int = 60
+    runtime_guard_enabled: bool = False
+    runtime_guard_heartbeat_interval_seconds: int = 15
+    runtime_guard_stale_after_seconds: int = 75
+    runtime_guard_poll_interval_seconds: int = 10
+    runtime_guard_idle_exit_after_seconds: int = 120
+    runtime_guard_stale_confirmations: int = 2
 
 
 @dataclass

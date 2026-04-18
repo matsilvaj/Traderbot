@@ -22,6 +22,7 @@ from traderbot.data.database import create_tables, database_unavailable_reason
 from traderbot.env.trading_env import TradingEnv
 from traderbot.execution.hl_executor import ExecutionDecision, HyperliquidExecutor
 from traderbot.features.engineering import FeatureEngineer, default_feature_columns
+from traderbot.runtime_guard import RuntimeHeartbeat, run_runtime_guard, spawn_runtime_guard_process
 from traderbot.rl.backtest import (
     print_metrics,
     run_backtest,
@@ -29,6 +30,7 @@ from traderbot.rl.backtest import (
     save_backtest_result,
 )
 from traderbot.rl.model_manager import RLModelManager
+from traderbot.utils.fault_logging import install_fatal_error_hooks, uninstall_fatal_error_hooks
 from traderbot.utils.logger import setup_logger
 from traderbot.utils.telegram_notifier import TelegramNotifier
 
@@ -864,9 +866,10 @@ def _human_runtime_block_reason(reason: Any) -> str:
     mapping = {
         "regime_filter": "entrada bloqueada pelo filtro de regime",
         "cooldown": "entrada bloqueada pelo cooldown",
-        "order_cooldown": "entrada bloqueada por cooldown de ordem",
+        "order_cooldown": "entrada bloqueada pelo cooldown entre ordens",
         "duplicate_cycle": "entrada bloqueada para evitar ordem duplicada na mesma vela",
         "open_position_locked": "sinal ignorado porque existe posicao travada por TP/SL ou posicao em manutencao",
+        "native_tp_sl_unprotected": "posicao aberta sem TP/SL nativo confirmado na exchange",
         "prevented_same_candle_reversal": "reversao impedida na mesma vela",
         "min_notional_risk": "entrada pulada porque o notional minimo violaria o risco maximo",
         "min_notional": "entrada bloqueada por notional minimo da exchange",
@@ -876,6 +879,8 @@ def _human_runtime_block_reason(reason: Any) -> str:
 
 
 def _runtime_execution_action(result: dict[str, Any], position_side: int) -> str:
+    if bool(result.get("manual_protection_required", False)):
+        return "manual_protection_required"
     if result.get("error"):
         return "error"
     if result.get("opened_position"):
@@ -890,6 +895,8 @@ def _runtime_execution_action(result: dict[str, Any], position_side: int) -> str
 
 
 def _runtime_event_code(result: dict[str, Any], position_side: int) -> str:
+    if bool(result.get("manual_protection_required", False)):
+        return "risk.manual_tp_sl_required"
     if result.get("error"):
         return "runtime.cycle_error"
     if result.get("opened_position"):
@@ -988,6 +995,52 @@ def _close_open_position_on_shutdown(
     if int(snapshot.get("side", 0) or 0) == 0:
         return False
 
+    native_tp_sl_enabled = (
+        str(cfg.execution.execution_mode).lower().strip() == "exchange"
+        and bool(getattr(cfg.execution, "exchange_native_tp_sl_enabled", True))
+    )
+    if native_tp_sl_enabled:
+        try:
+            protection_result = executor.ensure_native_tp_sl(snapshot)
+        except Exception as exc:
+            logger.exception("Falha ao confirmar TP/SL nativo no encerramento do runtime.")
+            _safe_notifier_call(
+                logger,
+                notifier,
+                "notify_critical_error",
+                "Posicao aberta sem confirmacao de TP/SL nativo na parada do Traderbot",
+                f"{type(exc).__name__}: {exc}",
+                status="Offline",
+            )
+            return True
+
+        if bool(protection_result.get("ok", False)) and bool(protection_result.get("is_fully_protected", False)):
+            logger.warning(
+                "Runtime encerrando com posicao aberta protegida por TP/SL nativo; mantendo posicao na exchange | trigger=%s | protection=%s",
+                trigger,
+                json.dumps(protection_result, ensure_ascii=False),
+            )
+            return False
+
+        logger.error(
+            "Runtime encerrando com posicao aberta sem TP/SL nativo confirmado; mantendo posicao aberta para evitar zeragem automatica | trigger=%s | snapshot=%s | protection=%s",
+            trigger,
+            json.dumps(snapshot, ensure_ascii=False),
+            json.dumps(protection_result, ensure_ascii=False),
+        )
+        _safe_notifier_call(
+            logger,
+            notifier,
+            "notify_critical_error",
+            "Posicao aberta sem TP/SL nativo confirmado na parada do Traderbot",
+            str(
+                protection_result.get("error")
+                or "A posicao permaneceu aberta e precisa de verificacao manual na exchange."
+            ),
+            status="Offline",
+        )
+        return True
+
     logger.warning(
         "Runtime encerrando com posicao aberta; tentando fechar | trigger=%s | snapshot=%s",
         trigger,
@@ -1051,6 +1104,14 @@ def _restore_runtime_signal_handlers(previous_handlers: dict[signal.Signals, Any
         signal.signal(current_signal, previous_handler)
 
 
+def _runtime_guard_should_run(cfg: AppConfig) -> bool:
+    return (
+        bool(cfg.execution.runtime_guard_enabled)
+        and str(cfg.execution.execution_mode).lower().strip() == "exchange"
+        and not bool(getattr(cfg.execution, "exchange_native_tp_sl_enabled", True))
+    )
+
+
 def _handle_runtime_side_effects(
     cfg: AppConfig,
     result: dict[str, Any],
@@ -1059,27 +1120,59 @@ def _handle_runtime_side_effects(
 ) -> None:
     symbol = str(cfg.hyperliquid.symbol).strip().upper()
     position_snapshot = result.get("position_snapshot") or {}
+    open_side = str(result.get("trade_direction", "")).strip().lower()
+    open_price = _as_float(result.get("open_price") or position_snapshot.get("avg_entry_price"))
+    open_amount = _as_float(result.get("position_size", result.get("volume", result.get("adjusted_volume", 0.0))))
+    sizing = result.get("sizing") or {}
+    open_notional = _as_float(sizing.get("adjusted_notional"))
+    if open_notional <= 0 and open_price > 0 and open_amount > 0:
+        open_notional = open_price * open_amount
 
-    if bool(result.get("opened_position", False)):
-        open_side = str(result.get("trade_direction", "")).strip().lower()
-        open_price = _as_float(result.get("open_price") or position_snapshot.get("avg_entry_price"))
-        open_amount = _as_float(result.get("position_size", result.get("volume", result.get("adjusted_volume", 0.0))))
-        sizing = result.get("sizing") or {}
-        open_notional = _as_float(sizing.get("adjusted_notional"))
-        if open_notional <= 0 and open_price > 0 and open_amount > 0:
-            open_notional = open_price * open_amount
-        if notifier is not None and open_side in {"buy", "sell"} and open_price > 0 and open_amount > 0:
+    manual_protection_required = bool(result.get("manual_protection_required", False)) or (
+        str(result.get("blocked_reason") or "").strip().lower() == "native_tp_sl_unprotected"
+        and int(position_snapshot.get("side", 0) or 0) != 0
+    )
+    if not manual_protection_required:
+        setattr(_handle_runtime_side_effects, "_last_manual_tp_sl_alert_key", None)
+
+    if manual_protection_required and notifier is not None:
+        alert_side = open_side or ("buy" if int(position_snapshot.get("side", 0) or 0) > 0 else "sell")
+        alert_key = (
+            symbol,
+            alert_side,
+            round(open_price, 8),
+            round(_as_float(result.get("take_profit_price")), 8),
+            round(_as_float(result.get("stop_loss_price")), 8),
+        )
+        last_alert_key = getattr(_handle_runtime_side_effects, "_last_manual_tp_sl_alert_key", None)
+        if alert_key != last_alert_key:
             _safe_notifier_call(
                 logger,
                 notifier,
-                "notify_order_executed",
+                "notify_manual_tp_sl_required",
                 asset=symbol,
-                side=open_side,
-                price=open_price,
-                quantity=open_notional if open_notional > 0 else open_amount,
+                side=alert_side,
+                entry_price=open_price if open_price > 0 else None,
                 tp=result.get("take_profit_price"),
                 sl=result.get("stop_loss_price"),
             )
+            setattr(_handle_runtime_side_effects, "_last_manual_tp_sl_alert_key", alert_key)
+
+    if bool(result.get("opened_position", False)):
+        manual_protection_required = bool(result.get("manual_protection_required", False))
+        if notifier is not None and open_side in {"buy", "sell"} and open_price > 0 and open_amount > 0:
+            if not manual_protection_required:
+                _safe_notifier_call(
+                    logger,
+                    notifier,
+                    "notify_order_executed",
+                    asset=symbol,
+                    side=open_side,
+                    price=open_price,
+                    quantity=open_notional if open_notional > 0 else open_amount,
+                    tp=result.get("take_profit_price"),
+                    sl=result.get("stop_loss_price"),
+                )
 
     if bool(result.get("closed_position", False)):
         _notify_position_closed_from_result(cfg, result, logger, notifier)
@@ -1197,6 +1290,8 @@ def _build_runtime_cycle_log(
         "exit_reason": result.get("exit_reason") or (result.get("stop_take_event", {}) or {}).get("trigger"),
         "error": result.get("error"),
         "response_ok": bool(result.get("ok", False)),
+        "manual_protection_required": bool(result.get("manual_protection_required", False)),
+        "manual_protection_message": str(result.get("manual_protection_message") or "").strip() or None,
     }
 
     sizing = {
@@ -1305,6 +1400,8 @@ def _build_runtime_cycle_log(
         "stop_loss_price": execution["stop_loss_price"],
         "take_profit_price": execution["take_profit_price"],
         "exit_reason": execution["exit_reason"],
+        "manual_protection_required": execution["manual_protection_required"],
+        "manual_protection_message": execution["manual_protection_message"],
         "force_exit_only_by_tp_sl": filters["force_exit_only_by_tp_sl"],
         "ignored_signal": filters["ignored_signal"],
         "attempted_reversal": filters["attempted_reversal"],
@@ -1426,6 +1523,7 @@ def run_execution_pipeline(
     logger,
     model_path: str | None,
     notifier: TelegramNotifier | None = None,
+    runtime_guard_context: dict[str, Any] | None = None,
 ):
     env_cfg = prepare_runtime_environment_cfg(cfg, logger)
     fe, cols, train_df = prepare_live_inference_context(cfg, logger)
@@ -1475,7 +1573,27 @@ def run_execution_pipeline(
         take_profit_pct=cfg.environment.take_profit_pct,
         slippage_pct=cfg.environment.slippage_pct,
     )
+    heartbeat: RuntimeHeartbeat | None = None
+    if _runtime_guard_should_run(cfg):
+        heartbeat = RuntimeHeartbeat(cfg, logger)
+        heartbeat.start()
+        if runtime_guard_context is not None:
+            spawn_runtime_guard_process(
+                logger=logger,
+                config_path=str(runtime_guard_context.get("config_path") or "config.yaml"),
+                state_path=heartbeat.state_path,
+                network_override=runtime_guard_context.get("network_override"),
+                execution_mode_override=runtime_guard_context.get("execution_mode_override"),
+                allow_live_trading=bool(runtime_guard_context.get("allow_live_trading", False)),
+                order_slippage_override=runtime_guard_context.get("order_slippage_override"),
+            )
+
     executor.connect()
+    if heartbeat is not None:
+        heartbeat.mark_status(
+            "running",
+            executor_connected_at=datetime.now(timezone.utc).isoformat(),
+        )
     runtime_balance_context = executor.get_sizing_balance_context(cfg.execution.execution_mode)
     logger.info(
         "Executor conectado | network=%s | execution_mode=%s | base_url=%s | decision_mode=%s | modelos=%s | available_to_trade=%.2f | sizing_balance_used=%.2f | saldo_fonte=%s | order_slippage=%.4f | model_slippage=%.5f",
@@ -1501,6 +1619,13 @@ def run_execution_pipeline(
         while True:
             try:
                 obs, live_context = build_live_observation(cfg, executor, cols, fe)
+                if heartbeat is not None:
+                    heartbeat.update(
+                        status="running",
+                        last_cycle_started_at=datetime.now(timezone.utc).isoformat(),
+                        last_bar_timestamp=str(live_context.get("bar_timestamp", "")),
+                        last_reference_price=float(live_context.get("reference_price", 0.0) or 0.0),
+                    )
                 action, vote_info = infer_latest_action_ensemble(
                     model_entries,
                     obs,
@@ -1520,6 +1645,16 @@ def run_execution_pipeline(
                 )
                 cycle_log = _build_runtime_cycle_log(cfg, live_context, vote_info, action, result)
                 logger.info("Ciclo runtime HL | %s", json.dumps(cycle_log, ensure_ascii=False))
+                if heartbeat is not None:
+                    heartbeat.update(
+                        status="running",
+                        last_cycle_completed_at=datetime.now(timezone.utc).isoformat(),
+                        last_runtime_event_code=str(cycle_log.get("event_code") or ""),
+                        last_blocked_reason=cycle_log.get("blocked_reason"),
+                        last_position_label=str(cycle_log.get("position_label") or ""),
+                        last_cycle_error=None,
+                        last_cycle_error_at=None,
+                    )
                 _handle_runtime_side_effects(cfg, result, logger, notifier=notifier)
             except Exception as exc:
                 pause_seconds = max(1.0, float(cfg.execution.pause_on_error_seconds))
@@ -1529,6 +1664,12 @@ def run_execution_pipeline(
                 )
                 now = time.time()
                 error_signature = f"{type(exc).__name__}:{exc}"
+                if heartbeat is not None:
+                    heartbeat.update(
+                        status="running",
+                        last_cycle_error=error_signature,
+                        last_cycle_error_at=datetime.now(timezone.utc).isoformat(),
+                    )
                 if (
                     error_signature != last_runtime_error_signature
                     or (now - last_runtime_error_notified_at) >= max(300.0, pause_seconds * 5.0)
@@ -1570,11 +1711,22 @@ def run_execution_pipeline(
         shutdown_trigger = "shutdown_after_error"
         raise
     finally:
+        if heartbeat is not None:
+            heartbeat.mark_status(
+                "stopping",
+                shutdown_trigger=shutdown_trigger,
+            )
         _restore_runtime_signal_handlers(previous_signal_handlers)
         shutdown_had_error = _close_open_position_on_shutdown(cfg, executor, logger, notifier, shutdown_trigger)
         if notifier is not None and shutdown_trigger != "shutdown_after_error" and not shutdown_had_error:
             _safe_notifier_call(logger, notifier, "notify_stopped")
         executor.disconnect()
+        if heartbeat is not None:
+            heartbeat.stop(
+                final_status="stopped_after_error" if shutdown_trigger == "shutdown_after_error" else "stopped",
+                shutdown_trigger=shutdown_trigger,
+                shutdown_close_had_error=shutdown_had_error,
+            )
 
 
 def check_hyperliquid_pipeline(cfg: AppConfig, logger):
@@ -1740,11 +1892,13 @@ def close_hyperliquid_position_pipeline(
     cfg: AppConfig,
     logger,
     notifier: TelegramNotifier | None = None,
+    trigger: str = "manual_close_from_cli",
 ):
     logger.info(
-        "Fechamento manual Hyperliquid | network=%s execution_mode=%s",
+        "Fechamento manual Hyperliquid | network=%s execution_mode=%s | trigger=%s",
         cfg.hyperliquid.network,
         cfg.execution.execution_mode,
+        trigger,
     )
     executor = HyperliquidExecutor(
         cfg.hyperliquid,
@@ -1756,7 +1910,7 @@ def close_hyperliquid_position_pipeline(
     )
     executor.connect()
     try:
-        payload = executor.close_open_position(trigger="manual_close_from_cli")
+        payload = executor.close_open_position(trigger=trigger)
     finally:
         executor.disconnect()
     payload.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
@@ -1768,7 +1922,7 @@ def close_hyperliquid_position_pipeline(
     payload["timeframe"] = cfg.hyperliquid.timeframe
     payload["decision_summary"] = {
         "ok": bool(payload.get("ok")),
-        "trigger": payload.get("trigger", "manual_close_from_cli"),
+        "trigger": payload.get("trigger", trigger),
         "closed_position": bool(payload.get("closed_position", False)),
         "error": payload.get("error"),
     }
@@ -1794,6 +1948,16 @@ def apply_cli_runtime_overrides(cfg: AppConfig, args, logger) -> AppConfig:
     if overrides:
         logger.info("Overrides de runtime aplicados via CLI: %s", ", ".join(overrides))
     return cfg
+
+
+def build_runtime_guard_context(args) -> dict[str, Any]:
+    return {
+        "config_path": Path(args.config).resolve(),
+        "network_override": getattr(args, "network_override", None),
+        "execution_mode_override": getattr(args, "execution_mode_override", None),
+        "allow_live_trading": bool(getattr(args, "allow_live_trading", False)),
+        "order_slippage_override": getattr(args, "order_slippage_override", None),
+    }
 
 
 def parse_args():
@@ -1839,6 +2003,16 @@ def parse_args():
 
     p_run = sub.add_parser("run", help="Roda loop de inferência e execução (paper/live)")
     p_run.add_argument("--model-path", type=str, default=None, help="Caminho do modelo .zip")
+    p_guard = sub.add_parser(
+        "runtime-guard",
+        help="Monitora o heartbeat do runtime e fecha posicao se o processo morrer inesperadamente",
+    )
+    p_guard.add_argument(
+        "--state-path",
+        type=str,
+        required=True,
+        help="Arquivo JSON de heartbeat compartilhado pelo runtime principal",
+    )
     sub.add_parser("check-hyperliquid", help="Valida conexão Hyperliquid (wallet/rede/símbolo)")
     sub.add_parser("close-hyperliquid-position", help="Fecha a posição aberta atual na Hyperliquid")
     p_smoke = sub.add_parser(
@@ -1878,7 +2052,9 @@ def main():
     cfg = load_config(args.config)
     ensure_directories(cfg)
 
-    logger = setup_logger(cfg.app_name, cfg.paths.logs_dir)
+    logger_name = f"{cfg.app_name}-guard" if args.command == "runtime-guard" else cfg.app_name
+    logger = setup_logger(logger_name, cfg.paths.logs_dir)
+    fault_handle = install_fatal_error_hooks(logger_name, cfg.paths.logs_dir, logger=logger)
     cfg = apply_cli_runtime_overrides(cfg, args, logger)
     notifier = TelegramNotifier(logger=logger)
 
@@ -1915,7 +2091,21 @@ def main():
         elif args.command == "backtest":
             backtest_pipeline(cfg, logger, args.model_path)
         elif args.command == "run":
-            run_execution_pipeline(cfg, logger, args.model_path, notifier=notifier)
+            run_execution_pipeline(
+                cfg,
+                logger,
+                args.model_path,
+                notifier=notifier,
+                runtime_guard_context=build_runtime_guard_context(args),
+            )
+        elif args.command == "runtime-guard":
+            return run_runtime_guard(
+                cfg=cfg,
+                logger=logger,
+                notifier=notifier,
+                state_path=args.state_path,
+                close_position_callback=close_hyperliquid_position_pipeline,
+            )
         elif args.command == "check-hyperliquid":
             check_hyperliquid_pipeline(cfg, logger)
         elif args.command == "close-hyperliquid-position":
@@ -1944,7 +2134,9 @@ def main():
         raise
     except KeyboardInterrupt:
         logger.info("Traderbot encerrado por interrupcao.")
+    finally:
+        uninstall_fatal_error_hooks(fault_handle, logger=logger)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

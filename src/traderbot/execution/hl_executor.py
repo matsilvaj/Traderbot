@@ -294,6 +294,38 @@ class HyperliquidExecutor:
         sizing_context = self.get_sizing_balance_context(self._execution_mode())
         status["available_to_trade"] = float(sizing_context["available_to_trade"])
         status["available_to_trade_source_field"] = str(sizing_context["available_to_trade_source_field"])
+        try:
+            position_snapshot = self.get_position_snapshot()
+            position_side = int(position_snapshot.get("side", 0) or 0)
+            position_volume = float(position_snapshot.get("volume", 0.0) or 0.0)
+            position_entry_price = float(position_snapshot.get("avg_entry_price", 0.0) or 0.0)
+            position_notional_value = 0.0
+            if position_side != 0 and position_volume > 0 and position_entry_price > 0:
+                position_notional_value = position_entry_price * self._trade_units(position_volume)
+
+            status["position_snapshot"] = position_snapshot
+            status["position_is_open"] = position_side != 0
+            status["position_label"] = "LONG" if position_side > 0 else ("SHORT" if position_side < 0 else "FLAT")
+            status["position_size"] = position_volume
+            status["position_avg_entry_price"] = position_entry_price
+            status["position_unrealized_pnl"] = float(position_snapshot.get("unrealized_pnl", 0.0) or 0.0)
+            status["position_notional_value"] = float(position_notional_value)
+
+            native_tp_sl = self.get_native_tp_sl_status(position_snapshot)
+            status["native_tp_sl"] = native_tp_sl
+            status["native_tp_sl_protected"] = bool(native_tp_sl.get("is_fully_protected", False))
+            status["stop_loss_price"] = float(
+                native_tp_sl.get("stop_loss_price")
+                or native_tp_sl.get("expected_stop_loss_price")
+                or 0.0
+            )
+            status["take_profit_price"] = float(
+                native_tp_sl.get("take_profit_price")
+                or native_tp_sl.get("expected_take_profit_price")
+                or 0.0
+            )
+        except Exception as exc:  # pragma: no cover
+            status["position_error"] = str(exc)
         return status
 
     def _spot_user_state(self) -> dict:
@@ -763,6 +795,269 @@ class HyperliquidExecutor:
             return all(isinstance(status, dict) and not status.get("error") for status in statuses)
         return True
 
+    def _native_tp_sl_enabled(self) -> bool:
+        return self._execution_mode() == "exchange" and bool(
+            getattr(self.exec_cfg, "exchange_native_tp_sl_enabled", True)
+        )
+
+    def _symbol_dex(self) -> str:
+        symbol = str(self.hl_cfg.symbol).strip()
+        return symbol.split(":", 1)[0] if ":" in symbol else ""
+
+    @staticmethod
+    def _normalized_coin_name(value: object) -> str:
+        text = str(value or "").strip().upper()
+        return text.split(":")[-1] if text else ""
+
+    def _order_matches_symbol(self, order: dict) -> bool:
+        return self._normalized_coin_name(order.get("coin")) == self._normalized_coin_name(self.hl_cfg.symbol)
+
+    def _frontend_open_orders(self) -> list[dict]:
+        if not self.address:
+            return []
+        payload = self._call_with_retry(
+            "frontend_open_orders",
+            lambda: self._ensure_info().frontend_open_orders(self.address, self._symbol_dex()),
+        )
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        return []
+
+    def _native_tp_sl_orders(self) -> list[dict]:
+        orders: list[dict] = []
+        for order in self._frontend_open_orders():
+            if not self._order_matches_symbol(order):
+                continue
+            if not bool(order.get("reduceOnly", False)):
+                continue
+            is_trigger = bool(order.get("isTrigger", False))
+            if not is_trigger and float(order.get("triggerPx", 0.0) or 0.0) <= 0:
+                continue
+            orders.append(order)
+        return orders
+
+    def _classify_native_tp_sl_order(self, order: dict, entry_price: float, side: int) -> str | None:
+        trigger_px = float(order.get("triggerPx", 0.0) or 0.0)
+        if trigger_px <= 0 or entry_price <= 0 or side == 0:
+            return None
+        if side > 0:
+            if trigger_px < entry_price:
+                return "sl"
+            if trigger_px > entry_price:
+                return "tp"
+            return None
+        if trigger_px > entry_price:
+            return "sl"
+        if trigger_px < entry_price:
+            return "tp"
+        return None
+
+    def _price_tolerance(self) -> float:
+        spec = self.get_symbol_trading_spec()
+        return max(float(spec.point), 1e-8)
+
+    def _size_tolerance(self) -> float:
+        spec = self.get_symbol_trading_spec()
+        return max(float(spec.volume_step), 1e-12)
+
+    def get_native_tp_sl_status(self, snapshot: dict | None = None) -> dict:
+        snapshot = dict(snapshot or self.get_position_snapshot())
+        side = int(snapshot.get("side", 0) or 0)
+        entry_price = float(snapshot.get("avg_entry_price", 0.0) or 0.0)
+        volume = float(snapshot.get("volume", 0.0) or 0.0)
+        expected_stop, expected_take = self._stop_take_prices(entry_price, side)
+        orders = self._native_tp_sl_orders() if self._native_tp_sl_enabled() else []
+
+        tp_orders: list[dict] = []
+        sl_orders: list[dict] = []
+        for order in orders:
+            classification = self._classify_native_tp_sl_order(order, entry_price, side)
+            if classification == "tp":
+                tp_orders.append(order)
+            elif classification == "sl":
+                sl_orders.append(order)
+
+        def _pick_trigger_price(candidates: list[dict]) -> float | None:
+            if len(candidates) != 1:
+                return None
+            trigger_px = float(candidates[0].get("triggerPx", 0.0) or 0.0)
+            return trigger_px if trigger_px > 0 else None
+
+        def _pick_size(candidates: list[dict]) -> float | None:
+            if len(candidates) != 1:
+                return None
+            raw = candidates[0].get("origSz", candidates[0].get("sz", 0.0))
+            size = float(raw or 0.0)
+            return size if size > 0 else None
+
+        stop_loss_price = _pick_trigger_price(sl_orders)
+        take_profit_price = _pick_trigger_price(tp_orders)
+        stop_loss_size = _pick_size(sl_orders)
+        take_profit_size = _pick_size(tp_orders)
+        price_tol = self._price_tolerance()
+        size_tol = self._size_tolerance()
+
+        has_stop = stop_loss_price is not None
+        has_take = take_profit_price is not None
+        stop_matches = (
+            has_stop
+            and expected_stop is not None
+            and abs(float(stop_loss_price) - float(expected_stop)) <= price_tol
+            and stop_loss_size is not None
+            and abs(float(stop_loss_size) - float(volume)) <= size_tol
+        )
+        take_matches = (
+            has_take
+            and expected_take is not None
+            and abs(float(take_profit_price) - float(expected_take)) <= price_tol
+            and take_profit_size is not None
+            and abs(float(take_profit_size) - float(volume)) <= size_tol
+        )
+        is_fully_protected = side == 0 or (stop_matches and take_matches and len(sl_orders) == 1 and len(tp_orders) == 1)
+
+        return {
+            "enabled": self._native_tp_sl_enabled(),
+            "has_position": side != 0,
+            "position_side": side,
+            "position_volume": volume,
+            "expected_stop_loss_price": expected_stop,
+            "expected_take_profit_price": expected_take,
+            "stop_loss_price": stop_loss_price,
+            "take_profit_price": take_profit_price,
+            "stop_loss_orders": sl_orders,
+            "take_profit_orders": tp_orders,
+            "stop_loss_size": stop_loss_size,
+            "take_profit_size": take_profit_size,
+            "has_stop_loss": has_stop,
+            "has_take_profit": has_take,
+            "stop_matches_expected": stop_matches,
+            "take_matches_expected": take_matches,
+            "is_fully_protected": is_fully_protected,
+            "open_orders_count": len(orders),
+            "open_orders": orders,
+        }
+
+    def _cancel_native_tp_sl_orders(self, orders: list[dict] | None = None) -> dict:
+        if self.exchange is None:
+            return {
+                "ok": False,
+                "canceled": 0,
+                "error": "Hyperliquid exchange is not initialized for TP/SL cancelation.",
+            }
+
+        candidates = orders if orders is not None else self._native_tp_sl_orders()
+        cancel_requests = []
+        for order in candidates:
+            oid = int(order.get("oid", 0) or 0)
+            if oid <= 0:
+                continue
+            cancel_requests.append({"coin": str(order.get("coin") or self.hl_cfg.symbol), "oid": oid})
+
+        if not cancel_requests:
+            return {"ok": True, "canceled": 0, "response": None}
+
+        response = self._call_with_retry(
+            "cancel_native_tp_sl_orders",
+            lambda: self.exchange.bulk_cancel(cancel_requests),
+        )
+        return {
+            "ok": self._response_ok(response),
+            "canceled": len(cancel_requests),
+            "response": response,
+        }
+
+    def _build_native_tp_sl_orders(self, snapshot: dict) -> tuple[list[dict], float | None, float | None]:
+        side = int(snapshot.get("side", 0) or 0)
+        entry_price = float(snapshot.get("avg_entry_price", 0.0) or 0.0)
+        volume = float(snapshot.get("volume", 0.0) or 0.0)
+        stop_loss_price, take_profit_price = self._stop_take_prices(entry_price, side)
+        if side == 0 or entry_price <= 0 or volume <= 0 or stop_loss_price is None or take_profit_price is None:
+            return [], stop_loss_price, take_profit_price
+
+        close_is_buy = side < 0
+        sl_limit_px = self._slippage_price(str(self.hl_cfg.symbol), close_is_buy, 0.10, stop_loss_price)
+        tp_limit_px = self._slippage_price(str(self.hl_cfg.symbol), close_is_buy, 0.10, take_profit_price)
+        orders = [
+            {
+                "coin": str(self.hl_cfg.symbol),
+                "is_buy": close_is_buy,
+                "sz": volume,
+                "limit_px": float(sl_limit_px),
+                "order_type": {
+                    "trigger": {
+                        "triggerPx": float(stop_loss_price),
+                        "isMarket": True,
+                        "tpsl": "sl",
+                    }
+                },
+                "reduce_only": True,
+            },
+            {
+                "coin": str(self.hl_cfg.symbol),
+                "is_buy": close_is_buy,
+                "sz": volume,
+                "limit_px": float(tp_limit_px),
+                "order_type": {
+                    "trigger": {
+                        "triggerPx": float(take_profit_price),
+                        "isMarket": True,
+                        "tpsl": "tp",
+                    }
+                },
+                "reduce_only": True,
+            },
+        ]
+        return orders, stop_loss_price, take_profit_price
+
+    def ensure_native_tp_sl(self, snapshot: dict | None = None) -> dict:
+        snapshot = dict(snapshot or self.get_position_snapshot())
+        protection = self.get_native_tp_sl_status(snapshot)
+        if not protection["enabled"] or not protection["has_position"]:
+            return {"ok": True, "changed": False, **protection}
+        if protection["is_fully_protected"]:
+            return {"ok": True, "changed": False, **protection}
+        if self.exchange is None:
+            return {
+                "ok": False,
+                "changed": False,
+                "error": "Hyperliquid exchange is not initialized for TP/SL placement.",
+                **protection,
+            }
+
+        cancel_result = self._cancel_native_tp_sl_orders(protection.get("open_orders"))
+        if not bool(cancel_result.get("ok", False)):
+            return {
+                "ok": False,
+                "changed": False,
+                "error": "Falha ao cancelar TP/SL nativos antigos antes de recriar a proteção.",
+                "cancel_result": cancel_result,
+                **protection,
+            }
+
+        order_requests, expected_stop, expected_take = self._build_native_tp_sl_orders(snapshot)
+        if not order_requests:
+            return {
+                "ok": False,
+                "changed": False,
+                "error": "Nao foi possivel construir TP/SL nativos para a posicao aberta.",
+                **protection,
+            }
+
+        response = self._call_with_retry(
+            "place_native_tp_sl_orders",
+            lambda: self.exchange.bulk_orders(order_requests, grouping="positionTpsl"),
+        )
+        updated = self.get_native_tp_sl_status(snapshot)
+        return {
+            "ok": self._response_ok(response) and bool(updated.get("is_fully_protected", False)),
+            "changed": True,
+            "response": response,
+            "cancel_result": cancel_result,
+            "expected_stop_loss_price": expected_stop,
+            "expected_take_profit_price": expected_take,
+            **updated,
+        }
+
     def _close_live_position(self, snapshot: dict, price: float, timestamp: str, trigger: str) -> dict:
         if self.exchange is None:
             return {
@@ -799,6 +1094,9 @@ class HyperliquidExecutor:
             self._set_trade_cooldown("live")
         final_snapshot = self.get_position_snapshot()
         closed_position = bool(self._response_ok(response)) and int(final_snapshot.get("side", 0) or 0) == 0
+        cleanup_result = None
+        if closed_position and self._native_tp_sl_enabled():
+            cleanup_result = self._cancel_native_tp_sl_orders()
         return {
             "ok": self._response_ok(response),
             "closed_position": closed_position,
@@ -806,6 +1104,7 @@ class HyperliquidExecutor:
             "timestamp": timestamp,
             "trigger": trigger,
             "response": response,
+            "native_tp_sl_cleanup": cleanup_result,
             "close_event": {
                 "closed": closed_position,
                 "side": side,
@@ -1215,18 +1514,33 @@ class HyperliquidExecutor:
                 "error": "HL_PRIVATE_KEY missing or Hyperliquid executor not initialized.",
             })
 
-        stop_take_result = self._maybe_close_live_position(timestamp)
-        if stop_take_result is not None:
-            self._mark_order_sent_in_bar("live", str(decision.bar_timestamp))
-            return enrich(stop_take_result)
-
         current_snapshot = self.get_position_snapshot()
         current_side = int(current_snapshot.get("side", 0))
-        current_stop, current_take = self._stop_take_prices(
-            float(current_snapshot.get("avg_entry_price", 0.0)),
-            current_side,
-        )
+        protection_status = self.get_native_tp_sl_status(current_snapshot)
+        current_stop = protection_status.get("stop_loss_price") or protection_status.get("expected_stop_loss_price")
+        current_take = protection_status.get("take_profit_price") or protection_status.get("expected_take_profit_price")
         if current_snapshot["side"] != 0:
+            if self._native_tp_sl_enabled():
+                protection_status = self.ensure_native_tp_sl(current_snapshot)
+                current_stop = protection_status.get("stop_loss_price") or protection_status.get(
+                    "expected_stop_loss_price"
+                )
+                current_take = protection_status.get("take_profit_price") or protection_status.get(
+                    "expected_take_profit_price"
+                )
+                if not bool(protection_status.get("ok", False)):
+                    return enrich({
+                        "ok": False,
+                        "error": "Open position detected without confirmed native TP/SL protection on Hyperliquid.",
+                        "blocked_reason": "native_tp_sl_unprotected",
+                        "position_size": float(current_snapshot.get("volume", 0.0)),
+                        "stop_loss_price": current_stop,
+                        "take_profit_price": current_take,
+                        "position_snapshot": current_snapshot,
+                        "native_tp_sl": protection_status,
+                        "force_exit_only_by_tp_sl": bool(self.env_cfg.force_exit_only_by_tp_sl),
+                    })
+
             attempted_reversal = self._is_opposite_signal(trade_direction, current_side)
             if bool(self.env_cfg.force_exit_only_by_tp_sl):
                 return enrich({
@@ -1240,6 +1554,7 @@ class HyperliquidExecutor:
                     "stop_loss_price": current_stop,
                     "take_profit_price": current_take,
                     "position_snapshot": current_snapshot,
+                    "native_tp_sl": protection_status,
                     "force_exit_only_by_tp_sl": True,
                 })
 
@@ -1265,6 +1580,7 @@ class HyperliquidExecutor:
                 result["attempted_reversal"] = True
                 result["prevented_same_candle_reversal"] = True
                 result["force_exit_only_by_tp_sl"] = False
+                result["native_tp_sl"] = protection_status
                 return enrich(result)
 
             return enrich({
@@ -1275,6 +1591,7 @@ class HyperliquidExecutor:
                 "stop_loss_price": current_stop,
                 "take_profit_price": current_take,
                 "position_snapshot": current_snapshot,
+                "native_tp_sl": protection_status,
                 "force_exit_only_by_tp_sl": False,
             })
 
@@ -1365,13 +1682,48 @@ class HyperliquidExecutor:
             self.live_entry_opened_at = time.time()
             self.live_entry_distance_from_ema_240 = float(decision.entry_distance_from_ema_240)
             self._mark_order_sent_in_bar("live", str(decision.bar_timestamp))
-        stop_loss_price, take_profit_price = self._stop_take_prices(
-            price,
-            1 if trade_direction == "BUY" else -1,
-        )
-
         final_snapshot = self.get_position_snapshot()
         opened_position = bool(self._response_ok(response)) and int(final_snapshot.get("side", 0) or 0) != 0
+        protection_result = self.get_native_tp_sl_status(final_snapshot)
+        stop_loss_price = protection_result.get("stop_loss_price") or protection_result.get("expected_stop_loss_price")
+        take_profit_price = protection_result.get("take_profit_price") or protection_result.get(
+            "expected_take_profit_price"
+        )
+        if opened_position and self._native_tp_sl_enabled():
+            protection_result = self.ensure_native_tp_sl(final_snapshot)
+            stop_loss_price = protection_result.get("stop_loss_price") or protection_result.get(
+                "expected_stop_loss_price"
+            )
+            take_profit_price = protection_result.get("take_profit_price") or protection_result.get(
+                "expected_take_profit_price"
+            )
+            if not bool(protection_result.get("ok", False)):
+                return enrich_with_sizing({
+                    "ok": False,
+                    "error": (
+                        "Position opened, but native TP/SL could not be confirmed on Hyperliquid. "
+                        "Manual TP/SL placement is required."
+                    ),
+                    "blocked_reason": "native_tp_sl_unprotected",
+                    "volume": volume,
+                    "position_size": float(final_snapshot.get("volume", 0.0) or 0.0),
+                    "sizing": sizing,
+                    "risk_state": risk_state,
+                    "opened_position": True,
+                    "closed_position": False,
+                    "open_price": float(price),
+                    "stop_loss_price": stop_loss_price,
+                    "take_profit_price": take_profit_price,
+                    "response": response,
+                    "position_snapshot": final_snapshot,
+                    "native_tp_sl": protection_result,
+                    "manual_protection_required": True,
+                    "manual_protection_message": (
+                        "Nao consegui criar o gatilho de SL e TP na Hyperliquid. "
+                        f"Configure manualmente: TP ${float(take_profit_price or 0.0):.2f} "
+                        f"e SL ${float(stop_loss_price or 0.0):.2f}."
+                    ),
+                }, sizing=sizing, balance_context=sizing_context)
 
         return enrich_with_sizing({
             "ok": self._response_ok(response),
@@ -1385,4 +1737,5 @@ class HyperliquidExecutor:
             "take_profit_price": take_profit_price,
             "response": response,
             "position_snapshot": final_snapshot,
+            "native_tp_sl": protection_result,
         }, sizing=sizing, balance_context=sizing_context)

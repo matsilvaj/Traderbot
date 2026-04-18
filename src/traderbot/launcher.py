@@ -166,6 +166,59 @@ def _apply_windows_app_identity() -> None:
         pass
 
 
+def _apply_windows_taskbar_icon(window: QWidget) -> None:
+    if os.name != "nt" or not LAUNCHER_ICON_PATH.exists():
+        return
+
+    try:
+        hwnd = int(window.winId())
+        if hwnd <= 0:
+            return
+
+        image_icon = 1
+        wm_seticon = 0x0080
+        icon_small = 0
+        icon_big = 1
+        lr_loadfromfile = 0x0010
+        lr_defaultsize = 0x0040
+        gclp_hicon = -14
+        gclp_hiconsm = -34
+
+        load_image = ctypes.windll.user32.LoadImageW
+        send_message = ctypes.windll.user32.SendMessageW
+        set_class_long_ptr = getattr(ctypes.windll.user32, "SetClassLongPtrW", None)
+        if set_class_long_ptr is None:
+            set_class_long_ptr = ctypes.windll.user32.SetClassLongW
+
+        big_icon = load_image(
+            None,
+            str(LAUNCHER_ICON_PATH),
+            image_icon,
+            0,
+            0,
+            lr_loadfromfile | lr_defaultsize,
+        )
+        small_icon = load_image(
+            None,
+            str(LAUNCHER_ICON_PATH),
+            image_icon,
+            16,
+            16,
+            lr_loadfromfile,
+        )
+
+        if big_icon:
+            send_message(hwnd, wm_seticon, icon_big, big_icon)
+            set_class_long_ptr(hwnd, gclp_hicon, big_icon)
+        if small_icon:
+            send_message(hwnd, wm_seticon, icon_small, small_icon)
+            set_class_long_ptr(hwnd, gclp_hiconsm, small_icon)
+
+        setattr(window, "_windows_taskbar_icons", (big_icon, small_icon))
+    except Exception:
+        pass
+
+
 @dataclass(frozen=True)
 class LauncherMode:
     key: str
@@ -234,6 +287,7 @@ class DashboardState:
     entry_label: str = "--"
     take_profit_label: str = "--"
     stop_loss_label: str = "--"
+    native_tp_sl_status: dict[str, Any] = field(default_factory=dict)
     pnl_label: str = "--"
     pnl_style: str = "muted"
     last_raw_detail: str = ""
@@ -855,7 +909,7 @@ class TraderBotLauncher(QMainWindow):
             self._handle_task_finished,
         )
 
-        self.setWindowTitle("Trader Laucher")
+        self.setWindowTitle("Trader Launcher")
         if LAUNCHER_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(LAUNCHER_ICON_PATH)))
         self.resize(1280, 820)
@@ -1293,7 +1347,7 @@ class TraderBotLauncher(QMainWindow):
         self.clear_terminal_button.clicked.connect(self._clear_terminal_output)
         header.addWidget(self.clear_terminal_button)
 
-        self.close_other_instances_button = QPushButton("Fechar outras instancias")
+        self.close_other_instances_button = QPushButton("Fechar processos orfaos")
         self.close_other_instances_button.setObjectName("SecondaryButton")
         self.close_other_instances_button.clicked.connect(self._close_other_instances)
         header.addWidget(self.close_other_instances_button)
@@ -1497,9 +1551,10 @@ class TraderBotLauncher(QMainWindow):
         if bot_running or position_open:
             answer = QMessageBox.warning(
                 self,
-                "Fechar launcher com seguranca",
-                "Fechar o launcher agora vai ativar o kill switch, parar o bot e tentar "
-                "zerar qualquer posicao aberta antes de sair.\n\n"
+                "Fechar launcher",
+                "Fechar o launcher agora vai parar o bot local, mas nao vai zerar "
+                "automaticamente uma posicao aberta.\n\n"
+                "Se houver TP/SL nativo na Hyperliquid, a protecao permanece ativa na exchange.\n\n"
                 "Deseja continuar?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
@@ -1507,10 +1562,8 @@ class TraderBotLauncher(QMainWindow):
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
-            self._close_after_kill_requested = True
-            self._shutdown_requires_flat_position = position_open
-            event.ignore()
-            self._queue_kill_switch(close_after=True)
+            self._finalize_launcher_shutdown()
+            event.accept()
             return
 
         self._finalize_launcher_shutdown()
@@ -1873,7 +1926,11 @@ class TraderBotLauncher(QMainWindow):
         self.state.last_cycle_fingerprint = ""
 
         if self.state.position_label in {"LONG", "SHORT"}:
-            self.state.position_status = f"Bot parado; revisar posição {self.state.position_label} na exchange."
+            self.state.position_status = self._position_status_text(
+                self.state.position_label,
+                runtime_running=False,
+                native_tp_sl=self.state.native_tp_sl_status,
+            )
         else:
             self.state.position_status = "Bot parado. Nenhum runtime ativo."
 
@@ -1938,13 +1995,12 @@ class TraderBotLauncher(QMainWindow):
             event = self._new_event(
                 source="launcher",
                 event_type="generic",
-                raw_line="Existe posição aberta. Use o kill switch antes de parar o bot.",
-                message="Existe posição aberta. Use o kill switch antes de parar o bot.",
+                raw_line="Parando runtime com posição aberta; a posição permanece na exchange com TP/SL nativo quando confirmado.",
+                message="Parando runtime com posição aberta; a posição permanece na exchange com TP/SL nativo quando confirmado.",
                 severity="warning",
-                event_code="risk.stop_blocked_open_position",
+                event_code="system.runtime_stop_requested_open_position",
             )
             self._push_event(event)
-            return
 
         self.runtime_stop_requested = True
         self._update_controls()
@@ -2114,12 +2170,22 @@ class TraderBotLauncher(QMainWindow):
         script = (
             f"$repo = '{repo_path}'; "
             "$namePattern = '^(python|pythonw|py|pyw)\\.exe$'; "
-            "$commandPattern = 'traderbot\\.(launcher|main)'; "
+            "$commandPattern = 'traderbot\\.(launcher_entry|launcher|main)'; "
             "$items = Get-CimInstance Win32_Process | Where-Object { "
             "$_.Name -match $namePattern -and $_.CommandLine -and ("
             "($_.CommandLine -like ('*' + $repo + '*')) -or "
             "($_.CommandLine -match $commandPattern)) "
-            "} | Select-Object ProcessId, ParentProcessId, Name, CommandLine; "
+            "} | ForEach-Object { "
+            "$processInfo = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; "
+            "[PSCustomObject]@{ "
+            "ProcessId = $_.ProcessId; "
+            "ParentProcessId = $_.ParentProcessId; "
+            "Name = $_.Name; "
+            "CommandLine = $_.CommandLine; "
+            "MainWindowHandle = if ($processInfo) { [int64]$processInfo.MainWindowHandle } else { 0 }; "
+            "MainWindowTitle = if ($processInfo) { $processInfo.MainWindowTitle } else { '' } "
+            "} "
+            "}; "
             "$items | ConvertTo-Json -Compress"
         )
         result = subprocess.run(
@@ -2144,6 +2210,45 @@ class TraderBotLauncher(QMainWindow):
             return []
         return [dict(item) for item in parsed if isinstance(item, dict)]
 
+    @staticmethod
+    def _process_command_line(process: dict[str, Any]) -> str:
+        return str(process.get("CommandLine") or "").strip().lower()
+
+    def _is_launcher_process(self, process: dict[str, Any]) -> bool:
+        command_line = self._process_command_line(process)
+        return "traderbot.launcher" in command_line or "traderbot.launcher_entry" in command_line
+
+    def _is_runtime_process(self, process: dict[str, Any]) -> bool:
+        command_line = self._process_command_line(process)
+        return "traderbot.main" in command_line and not self._is_launcher_process(process)
+
+    @staticmethod
+    def _has_visible_window(process: dict[str, Any]) -> bool:
+        try:
+            return int(process.get("MainWindowHandle") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _collect_process_tree(processes: list[dict[str, Any]], root_ids: set[int]) -> set[int]:
+        children_by_parent: dict[int, set[int]] = {}
+        for process in processes:
+            pid = int(process.get("ProcessId") or 0)
+            parent_pid = int(process.get("ParentProcessId") or 0)
+            if pid <= 0 or parent_pid <= 0:
+                continue
+            children_by_parent.setdefault(parent_pid, set()).add(pid)
+
+        preserved: set[int] = set()
+        stack = [pid for pid in root_ids if pid > 0]
+        while stack:
+            current_pid = int(stack.pop())
+            if current_pid <= 0 or current_pid in preserved:
+                continue
+            preserved.add(current_pid)
+            stack.extend(children_by_parent.get(current_pid, ()))
+        return preserved
+
     def _close_other_instances(self) -> None:
         if os.name != "nt":
             self._push_event(
@@ -2160,9 +2265,9 @@ class TraderBotLauncher(QMainWindow):
 
         answer = QMessageBox.warning(
             self,
-            "Fechar outras instancias",
-            "Encerrar todas as outras instancias do Traderbot e preservar esta janela?\n\n"
-            "Os processos filhos desta instancia atual tambem serao preservados.",
+            "Fechar processos orfaos",
+            "Encerrar apenas processos orfaos do Traderbot e preservar todos os launchers abertos?\n\n"
+            "Esta janela, os processos filhos dela e qualquer outro launcher serao preservados.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -2181,9 +2286,22 @@ class TraderBotLauncher(QMainWindow):
             return
 
         candidates: list[dict[str, Any]] = []
+        preserved = self._collect_process_tree(processes, protected)
+        launcher_roots = {
+            int(process.get("ProcessId") or 0)
+            for process in processes
+            if self._is_launcher_process(process)
+            and int(process.get("ProcessId") or 0) not in preserved
+        }
+        preserved.update(self._collect_process_tree(processes, launcher_roots))
+
         for process in processes:
             pid = int(process.get("ProcessId") or 0)
-            if pid <= 0 or pid in protected:
+            if pid <= 0 or pid in preserved:
+                continue
+            if not self._is_runtime_process(process):
+                continue
+            if self._has_visible_window(process):
                 continue
             candidates.append(process)
 
@@ -2192,8 +2310,8 @@ class TraderBotLauncher(QMainWindow):
                 self._new_event(
                     source="launcher",
                     event_type="generic",
-                    raw_line="Nenhuma outra instancia do Traderbot encontrada.",
-                    message="Nenhuma outra instancia do Traderbot encontrada.",
+                    raw_line="Nenhum processo orfao do Traderbot encontrado.",
+                    message="Nenhum processo orfao do Traderbot encontrado.",
                     severity="info",
                     event_code="system.close_other_instances_empty",
                 )
@@ -2206,10 +2324,6 @@ class TraderBotLauncher(QMainWindow):
             for item in candidates
             if int(item.get("ParentProcessId") or 0) not in candidate_ids
         ]
-        root_candidates.sort(
-            key=lambda item: 0 if "traderbot.launcher" in str(item.get("CommandLine") or "").lower() else 1
-        )
-
         terminated: list[int] = []
         failures: list[str] = []
         for process in root_candidates:
@@ -2497,14 +2611,57 @@ class TraderBotLauncher(QMainWindow):
         self.state.last_update_label = check_at.strftime("%H:%M:%S")
         self.state.last_raw_detail = json.dumps(payload, ensure_ascii=False, indent=2)
         runtime_running = self.run_process.state() != QProcess.NotRunning
+        native_tp_sl = self._native_tp_sl_payload(payload)
+        self.state.native_tp_sl_status = native_tp_sl
+        position_label = str(payload.get("position_label") or "").upper()
+        if not position_label:
+            snapshot = payload.get("position_snapshot") if isinstance(payload.get("position_snapshot"), dict) else {}
+            position_label = self._position_label_from_side(snapshot.get("side", payload.get("position_side")))
+        position_is_open = bool(payload.get("position_is_open")) or position_label in {"LONG", "SHORT"}
+
+        if position_is_open:
+            self.state.position_label = position_label
+            self.state.position_size_label = _currency(
+                payload.get("position_notional_value", payload.get("position_size", 0.0))
+            )
+            self.state.entry_label = _price(payload.get("position_avg_entry_price", 0.0))
+            self.state.take_profit_label = _price(payload.get("take_profit_price", 0.0))
+            self.state.stop_loss_label = _price(payload.get("stop_loss_price", 0.0))
+            pnl_value = float(payload.get("position_unrealized_pnl", 0.0) or 0.0)
+            self.state.pnl_label = _currency(pnl_value)
+            self.state.pnl_style = "success" if pnl_value >= 0 else "error"
+            self.state.position_status = self._position_status_text(
+                position_label,
+                runtime_running=runtime_running,
+                native_tp_sl=native_tp_sl,
+            )
+        else:
+            self.state.position_label = "FLAT"
+            self.state.position_size_label = "--"
+            self.state.entry_label = "--"
+            self.state.take_profit_label = "--"
+            self.state.stop_loss_label = "--"
+            self.state.native_tp_sl_status = {}
+            self.state.pnl_label = "--"
+            self.state.pnl_style = "muted"
         if connected and can_trade and not runtime_running:
             self.state.state_label = "PARADO"
-            self.state.state_message = "Conexão validada, mas o bot está parado."
+            self.state.state_message = "Conexao validada, mas o bot esta parado."
             self.state.state_style = "blocked"
             if self.state.position_label in {"LONG", "SHORT"}:
-                self.state.position_status = f"Bot parado; revisar posição {self.state.position_label} na exchange."
+                self.state.position_status = self._position_status_text(
+                    self.state.position_label,
+                    runtime_running=False,
+                    native_tp_sl=self.state.native_tp_sl_status,
+                )
             else:
                 self.state.position_status = "Bot parado. Nenhum runtime ativo."
+        if connected and can_trade and not runtime_running and position_is_open:
+            self.state.position_status = self._position_status_text(
+                self.state.position_label,
+                runtime_running=False,
+                native_tp_sl=self.state.native_tp_sl_status,
+            )
         self._refresh_dashboard()
         self._refresh_connectivity_health(
             emit_event=True,
@@ -2843,6 +3000,8 @@ class TraderBotLauncher(QMainWindow):
         final_action = decision_snapshot.get("final_action", payload.get("final_action", 0.0))
         vote_bucket = decision_snapshot.get("vote_bucket", payload.get("vote_bucket", "--"))
         blocked_reason = filter_snapshot.get("blocked_reason", payload.get("blocked_reason"))
+        manual_protection_required = bool(payload.get("manual_protection_required", False))
+        manual_protection_message = str(payload.get("manual_protection_message") or "").strip()
 
         self.state.reference_price = _optional_price(
             market_snapshot.get("reference_price", payload.get("reference_price", 0.0))
@@ -2865,6 +3024,8 @@ class TraderBotLauncher(QMainWindow):
         self.state.last_cycle_fingerprint = ""
 
         position_label = str(payload.get("position_label", "FLAT")).upper()
+        native_tp_sl = self._native_tp_sl_payload(payload)
+        self.state.native_tp_sl_status = native_tp_sl
         self.state.position_label = position_label
         self.state.position_size_label = _currency(payload.get("adjusted_notional", payload.get("notional_value", 0.0)))
         self.state.entry_label = _price(payload.get("position_avg_entry_price", 0.0))
@@ -2874,9 +3035,17 @@ class TraderBotLauncher(QMainWindow):
         self.state.pnl_label = _currency(pnl_value)
         self.state.pnl_style = "success" if pnl_value >= 0 else "error"
 
-        if payload.get("error"):
+        if manual_protection_required:
+            self.state.state_label = "AVISO"
+            self.state.state_message = (
+                manual_protection_message or "Protecao manual de TP/SL necessaria."
+            )
+            self.state.state_style = "blocked"
+        elif payload.get("error"):
             self.state.state_label = "ERRO"
-            self.state.state_message = "Execucao com erro. Revisar operacao."
+            self.state.state_message = (
+                manual_protection_message or "Execucao com erro. Revisar operacao."
+            )
             self.state.state_style = "error"
         elif blocked_reason:
             self.state.state_label = "BLOQUEADO"
@@ -2896,7 +3065,11 @@ class TraderBotLauncher(QMainWindow):
             self.state.state_style = "flat"
 
         if payload.get("position_is_open"):
-            self.state.position_status = f"{position_label} aberta no momento"
+            self.state.position_status = self._position_status_text(
+                position_label,
+                runtime_running=True,
+                native_tp_sl=native_tp_sl,
+            )
         elif blocked_reason:
             self.state.position_status = "Sem posicao; entrada bloqueada"
         else:
@@ -2908,22 +3081,27 @@ class TraderBotLauncher(QMainWindow):
             source=source,
             event_type="cycle",
             raw_line=json.dumps(payload, ensure_ascii=False),
+            message=manual_protection_message or "",
             payload=payload,
-            severity="execution",
-            event_code="execution.cycle",
+            severity="warning" if manual_protection_required else ("error" if payload.get("error") else "execution"),
+            event_code="risk.manual_tp_sl_required" if manual_protection_required else "execution.cycle",
         )
         summary = self.log_translator.local.summarize(event)
-        summary_text = str(summary.simple_summary or "").strip() or summary.message_human
+        summary_text = (
+            manual_protection_message
+            or str(summary.simple_summary or "").strip()
+            or summary.message_human
+        )
         if payload.get("opened_trade"):
             self.state.operations_today_label = self._increment_counter_label(self.state.operations_today_label)
-            self.state.last_trade_reason_label = summary.message_human
+            self.state.last_trade_reason_label = manual_protection_message or summary.message_human
         elif payload.get("closed_trade"):
             self.state.last_trade_reason_label = summary.message_human
         elif blocked_reason:
             self.state.blocked_today_label = self._increment_counter_label(self.state.blocked_today_label)
-            self.state.last_skip_reason_label = summary.message_human
+            self.state.last_skip_reason_label = manual_protection_message or summary.message_human
         else:
-            self.state.last_skip_reason_label = summary.message_human
+            self.state.last_skip_reason_label = manual_protection_message or summary.message_human
 
         self.state.last_decision = summary_text
         self.state.state_message = summary_text
@@ -3100,6 +3278,50 @@ class TraderBotLauncher(QMainWindow):
             return "SELL"
         return "HOLD"
 
+    @staticmethod
+    def _native_tp_sl_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        raw = payload.get("native_tp_sl")
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    @staticmethod
+    def _position_label_from_side(side: Any) -> str:
+        try:
+            side_value = int(side or 0)
+        except (TypeError, ValueError):
+            side_value = 0
+        if side_value > 0:
+            return "LONG"
+        if side_value < 0:
+            return "SHORT"
+        return "FLAT"
+
+    def _position_status_text(
+        self,
+        position_label: str,
+        *,
+        runtime_running: bool,
+        native_tp_sl: dict[str, Any] | None = None,
+    ) -> str:
+        if position_label not in {"LONG", "SHORT"}:
+            return "Sem sinal ativo" if runtime_running else "Bot parado. Nenhum runtime ativo."
+
+        protection = dict(native_tp_sl or {})
+        native_enabled = bool(protection.get("enabled", False))
+        fully_protected = bool(protection.get("is_fully_protected", False))
+
+        if runtime_running:
+            if native_enabled and fully_protected:
+                return f"{position_label} aberta com TP/SL nativo ativo"
+            if native_enabled:
+                return f"{position_label} aberta sem TP/SL nativo confirmado"
+            return f"{position_label} aberta no momento"
+
+        if native_enabled and fully_protected:
+            return f"Bot parado; posição {position_label} protegida por TP/SL nativo na Hyperliquid."
+        if native_enabled:
+            return f"Bot parado; posição {position_label} aberta sem TP/SL nativo confirmado."
+        return f"Bot parado; posição {position_label} aberta na exchange."
+
     def _human_block_label(self, reason: str) -> str:
         mapping = {
             "regime_filter": "Entrada bloqueada pelo filtro de regime",
@@ -3109,6 +3331,14 @@ class TraderBotLauncher(QMainWindow):
             "exchange_position_present": "Entrada ignorada: posição já existe",
             "duplicate_cycle_order": "Entrada ignorada para evitar ordem duplicada",
         }
+        mapping.update(
+            {
+                "order_cooldown": "Entrada bloqueada pelo cooldown entre ordens",
+                "open_position_locked": "Sinal ignorado: posição já aberta e protegida por TP/SL",
+                "native_tp_sl_unprotected": "Posição aberta sem TP/SL nativo confirmado na Hyperliquid",
+                "duplicate_cycle": "Entrada ignorada para evitar ordem duplicada na mesma vela",
+            }
+        )
         return mapping.get(reason, reason.replace("_", " "))
 
     def _strip_prefix(self, line: str) -> str:
@@ -3180,12 +3410,17 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 10))
     if LAUNCHER_ICON_PATH.exists():
-        app.setWindowIcon(QIcon(str(LAUNCHER_ICON_PATH)))
+        launcher_icon = QIcon(str(LAUNCHER_ICON_PATH))
+        app.setWindowIcon(launcher_icon)
     theme_path = REPO_ROOT / "theme.qss"
     if theme_path.exists():
         app.setStyleSheet(theme_path.read_text(encoding="utf-8"))
     window = TraderBotLauncher()
+    if LAUNCHER_ICON_PATH.exists():
+        window.setWindowIcon(launcher_icon)
     window.show()
+    _apply_windows_taskbar_icon(window)
+    QTimer.singleShot(0, lambda target=window: _apply_windows_taskbar_icon(target))
     try:
         return app.exec()
     finally:
@@ -3203,8 +3438,10 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
 def main() -> int:
     _apply_windows_app_identity()
     app = QApplication(sys.argv)
-    app.setApplicationName("Trader Laucher")
-    app.setApplicationDisplayName("Trader Laucher")
+    app.setApplicationName("Trader Launcher")
+    app.setApplicationDisplayName("Trader Launcher")
+    if hasattr(app, "setDesktopFileName"):
+        app.setDesktopFileName(WINDOWS_APP_ID)
     return _run_launcher_with_pid_lock(app)
 
 
