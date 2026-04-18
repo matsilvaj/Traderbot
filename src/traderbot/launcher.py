@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from traderbot.config import AppConfig, EnvironmentConfig, load_config
-from traderbot.launcher_services import HumanizedEvent, LauncherEvent
+from traderbot.launcher_services import HumanizedEvent, LauncherEvent, is_launcher_silenced_cycle_issue
 from traderbot.runtime_guard import read_runtime_state, runtime_state_path_for
 
 
@@ -260,8 +260,8 @@ MODES: dict[str, LauncherMode] = {
 class DashboardState:
     online: bool = False
     can_trade: bool = False
-    state_label: str = "AGUARDANDO"
-    state_message: str = "Aguardando dados do bot"
+    state_label: str = "CARREGANDO..."
+    state_message: str = "Carregando Informações..."
     state_style: str = "wait"
     regime_label: str = "indefinido"
     signal_label: str = "nenhum"
@@ -292,7 +292,7 @@ class DashboardState:
     humanized_simple_summary: str = ""
     last_cycle_fingerprint: str = ""
     position_label: str = "FLAT"
-    position_status: str = "Sem sinal ativo"
+    position_status: str = "Nenhuma Ordem Aberta"
     position_size_label: str = "--"
     entry_label: str = "--"
     take_profit_label: str = "--"
@@ -508,14 +508,14 @@ class EventDetailsDialog(QDialog):
             _configure_dynamic_label(details)
             root.addWidget(details)
 
-        raw_header = QLabel("Log tecnico")
+        raw_header = QLabel("Log técnico")
         raw_header.setObjectName("fieldLabel")
         root.addWidget(raw_header)
 
         raw_box = QPlainTextEdit()
         raw_box.setObjectName("technicalLog")
         raw_box.setReadOnly(True)
-        raw_box.setPlainText(self.summary.message_raw or "Sem log tecnico disponivel.")
+        raw_box.setPlainText(self.summary.message_raw or "Sem log técnico disponivel.")
         root.addWidget(raw_box, 1)
 
         footer = QHBoxLayout()
@@ -636,6 +636,8 @@ class NotificationItemWidget(QFrame):
 
 
 class SettingsDialog(QDialog):
+    RESTART_REQUESTED = 1001
+
     def __init__(
         self,
         cfg: AppConfig,
@@ -652,12 +654,15 @@ class SettingsDialog(QDialog):
             "regime_min_abs_dist_ema_240": float(env_defaults.regime_min_abs_dist_ema_240),
             "regime_min_vol_regime_z": float(env_defaults.regime_min_vol_regime_z),
             "auto_check_interval": float(self.cfg.launcher.auto_check_interval_seconds),
+            "smoke_side": "buy",
+            "smoke_wait_seconds": 3.0,
         }
         self.setModal(True)
         self.setWindowTitle("Configurações")
-        self.resize(620, 520)
-        self.setMinimumSize(560, 480)
+        self.resize(700, 620)
+        self.setMinimumSize(620, 520)
         self._build_ui(smoke_side=smoke_side, smoke_wait_seconds=smoke_wait_seconds)
+        self._initial_state = self._current_state()
 
     def _build_ui(self, smoke_side: str, smoke_wait_seconds: float) -> None:
         root = QVBoxLayout(self)
@@ -669,7 +674,7 @@ class SettingsDialog(QDialog):
         title.setObjectName("dialogTitle")
         root.addWidget(title)
 
-        hint = QLabel("Ajustes operacionais do launcher. Chaves sensíveis continuam fora da interface.")
+        hint = QLabel("Ajustes de filtros, risco e comportamento do bot. Todos os controles rápidos do launcher ficam disponíveis aqui.")
         hint.setObjectName("subtleText")
         _configure_dynamic_label(hint)
         root.addWidget(hint)
@@ -703,9 +708,6 @@ class SettingsDialog(QDialog):
         self.regime_vol_input.setValue(float(self.cfg.environment.regime_min_vol_regime_z))
         self.regime_vol_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.openai_status_label = QLabel("")
-        self.openai_status_label.setObjectName("badge")
-
         self.api_key_hint = QLabel("")
         self.api_key_hint.setObjectName("subtleText")
         _configure_dynamic_label(self.api_key_hint)
@@ -729,6 +731,18 @@ class SettingsDialog(QDialog):
         self.autocheck_input.setValue(float(self.cfg.launcher.auto_check_interval_seconds))
         self.autocheck_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+        scroll = QScrollArea()
+        scroll.setObjectName("SettingsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content = QWidget()
+        content.setObjectName("SettingsScrollContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(14)
+
         form = QGridLayout()
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(14)
@@ -745,48 +759,48 @@ class SettingsDialog(QDialog):
         form.addWidget(self.regime_vol_input, 3, 1)
         form.addWidget(self._field_label("Auto check"), 4, 0)
         form.addWidget(self.autocheck_input, 4, 1)
+        form.addWidget(self._field_label("Smoke side"), 5, 0)
+        form.addWidget(self.smoke_side_button, 5, 1)
+        form.addWidget(self._field_label("Wait smoke"), 6, 0)
+        form.addWidget(self.smoke_wait_input, 6, 1)
 
-        root.addLayout(form)
-        root.addWidget(self.api_key_hint)
-
-        self.advanced_button = QPushButton("Avançado")
-        self.advanced_button.setCheckable(True)
-        self.advanced_button.clicked.connect(self._toggle_advanced)
-        root.addWidget(self.advanced_button, 0, Qt.AlignLeft)
-
-        self.advanced_frame = QFrame()
-        self.advanced_frame.setObjectName("AdvancedFrame")
-        advanced_layout = QGridLayout(self.advanced_frame)
-        advanced_layout.setContentsMargins(0, 4, 0, 0)
-        advanced_layout.setHorizontalSpacing(14)
-        advanced_layout.setVerticalSpacing(14)
-        advanced_layout.setColumnStretch(0, 1)
-        advanced_layout.setColumnStretch(1, 2)
-        advanced_layout.addWidget(self._field_label("Smoke side"), 0, 0)
-        advanced_layout.addWidget(self.smoke_side_button, 0, 1)
-        advanced_layout.addWidget(self._field_label("Wait smoke"), 1, 0)
-        advanced_layout.addWidget(self.smoke_wait_input, 1, 1)
-        self.advanced_frame.hide()
-        root.addWidget(self.advanced_frame)
+        content_layout.addLayout(form)
+        content_layout.addWidget(self.api_key_hint)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
 
         footer = QHBoxLayout()
+        footer.setSpacing(12)
+
+        left_actions = QHBoxLayout()
+        left_actions.setSpacing(10)
 
         self.reset_button = QPushButton("Restaurar padrões")
         self.reset_button.clicked.connect(self._reset_to_defaults)
-        footer.addWidget(self.reset_button)
+        left_actions.addWidget(self.reset_button)
 
+        self.restart_button = QPushButton("Reiniciar")
+        self.restart_button.setObjectName("SecondaryButton")
+        self.restart_button.clicked.connect(self._request_restart)
+        left_actions.addWidget(self.restart_button)
+
+        footer.addLayout(left_actions)
         footer.addStretch(1)
+
+        right_actions = QHBoxLayout()
+        right_actions.setSpacing(10)
 
         self.cancel_button = QPushButton("Cancelar")
         self.cancel_button.clicked.connect(self.reject)
-        footer.addWidget(self.cancel_button)
+        right_actions.addWidget(self.cancel_button)
 
         self.save_button = QPushButton("Salvar")
         self.save_button.setObjectName("primary")
         self.save_button.clicked.connect(self.accept)
-        footer.addWidget(self.save_button)
+        right_actions.addWidget(self.save_button)
 
-        root.addStretch(1)
+        footer.addLayout(right_actions)
         root.addLayout(footer)
 
     def _field_label(self, text: str) -> QLabel:
@@ -797,37 +811,42 @@ class SettingsDialog(QDialog):
     def _toggle_smoke_side(self) -> None:
         self.smoke_side_button.setText("SELL" if self.smoke_side_button.isChecked() else "BUY")
 
-    def _toggle_advanced(self) -> None:
-        expanded = self.advanced_button.isChecked()
-        self.advanced_button.setText("Ocultar avancado" if expanded else "Avançado")
-        self.advanced_frame.setVisible(expanded)
-
     def _reset_to_defaults(self) -> None:
         self.risk_input.setValue(float(self._dialog_defaults["risk_pct"]))
         self.hold_threshold_input.setValue(float(self._dialog_defaults["hold_threshold"]))
         self.regime_abs_dist_input.setValue(float(self._dialog_defaults["regime_min_abs_dist_ema_240"]))
         self.regime_vol_input.setValue(float(self._dialog_defaults["regime_min_vol_regime_z"]))
         self.autocheck_input.setValue(float(self._dialog_defaults["auto_check_interval"]))
+        self.smoke_side_button.setChecked(str(self._dialog_defaults["smoke_side"]).lower() == "sell")
+        self._toggle_smoke_side()
+        self.smoke_wait_input.setValue(float(self._dialog_defaults["smoke_wait_seconds"]))
 
-    def _refresh_openai_state(self) -> None:
-        key_name = self.cfg.launcher.openai_api_key_env or "OPENAI_API_KEY"
-        has_key = _has_env_value(key_name)
-        if not self.cfg.launcher.openai_enabled:
-            self.openai_status_label.setText("Desativado")
-            _set_widget_property(self.openai_status_label, "severity", "blocked")
-            self.api_key_hint.setText("OpenAI foi desativada nas configuracoes do launcher.")
-        elif has_key:
-            self.openai_status_label.setText("Ativo")
-            _set_widget_property(self.openai_status_label, "severity", "execution")
-            self.api_key_hint.setText(f"OpenAI ativa no launcher. Chave detectada via {key_name}.")
-        else:
-            self.openai_status_label.setText("Sem chave")
-            _set_widget_property(self.openai_status_label, "severity", "warning")
-            self.api_key_hint.setText(
-                f"OpenAI esta habilitada, mas nenhuma chave foi detectada em {key_name}. "
-                "Sem isso, o resumo local continua como fallback."
+    def _current_state(self) -> dict[str, float | str]:
+        return {
+            "risk_pct": round(float(self.risk_input.value()), 4),
+            "hold_threshold": round(float(self.hold_threshold_input.value()), 4),
+            "regime_min_abs_dist_ema_240": round(float(self.regime_abs_dist_input.value()), 4),
+            "regime_min_vol_regime_z": round(float(self.regime_vol_input.value()), 4),
+            "auto_check_interval": round(float(self.autocheck_input.value()), 4),
+            "smoke_side": self.smoke_side(),
+            "smoke_wait_seconds": round(float(self.smoke_wait_input.value()), 4),
+        }
+
+    def has_unsaved_changes(self) -> bool:
+        return self._current_state() != self._initial_state
+
+    def _request_restart(self) -> None:
+        if self.has_unsaved_changes():
+            answer = QMessageBox.warning(
+                self,
+                "Reiniciar launcher",
+                "Existem alterações não salvas nesta janela. Reiniciar agora e descartar essas mudanças?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
-        _fit_label_height(self.api_key_hint)
+            if answer != QMessageBox.Yes:
+                return
+        self.done(self.RESTART_REQUESTED)
 
     def smoke_side(self) -> str:
         return "sell" if self.smoke_side_button.isChecked() else "buy"
@@ -864,6 +883,10 @@ class TraderBotLauncher(QMainWindow):
         self._kill_switch_in_progress = False
         self._close_after_kill_requested = False
         self._force_close_armed = False
+        self._restart_requested = False
+        self._restart_helper_started = False
+        self._restart_launch_program: str | None = None
+        self._restart_launch_args: list[str] = []
         self._shutdown_requires_flat_position = False
         self._active_task_context: dict[str, Any] = {"label": None, "silent": False}
         self._notification_widgets: dict[str, NotificationItemWidget] = {}
@@ -1053,11 +1076,11 @@ class TraderBotLauncher(QMainWindow):
         hero_left = QVBoxLayout()
         hero_left.setSpacing(8)
 
-        self.state_pill = QLabel("AGUARDANDO")
+        self.state_pill = QLabel("CARREGANDO...")
         self.state_pill.setObjectName("StatePill")
         hero_left.addWidget(self.state_pill, 0, Qt.AlignLeft)
 
-        self.state_message = QLabel("Aguardando dados do bot")
+        self.state_message = QLabel("Carregando Informações...")
         self.state_message.setObjectName("HeroTitle")
         _configure_dynamic_label(self.state_message)
         hero_left.addWidget(self.state_message)
@@ -1148,7 +1171,7 @@ class TraderBotLauncher(QMainWindow):
         self.position_pill.setObjectName("PositionPill")
         position_meta.addWidget(self.position_pill, 0, Qt.AlignLeft)
 
-        self.position_status = QLabel("Sem sinal ativo")
+        self.position_status = QLabel("Nenhuma Ordem Aberta")
         self.position_status.setObjectName("PositionStatus")
         _configure_dynamic_label(self.position_status)
         position_meta.addWidget(self.position_status)
@@ -1234,7 +1257,7 @@ class TraderBotLauncher(QMainWindow):
         decision_layout.setContentsMargins(18, 16, 18, 16)
         decision_layout.setSpacing(8)
 
-        decision_title = QLabel("Última Decisão do Ensemble")
+        decision_title = QLabel("Última Decisão do Bot")
         decision_title.setObjectName("fieldLabel")
         decision_layout.addWidget(decision_title)
 
@@ -1251,9 +1274,9 @@ class TraderBotLauncher(QMainWindow):
 
         content_layout.addWidget(decision_card)
 
-        self.details_filters_card = DetailFieldCard("Checks dos filtros", min_height=176)
+        self.details_filters_card = DetailFieldCard("Checks dos filtros", min_height=176, rich_summary=True)
         self.details_filters_card.set_summary("Aguardando proximo ciclo...")
-        self.details_filters_card.set_note("Os checks do HOLD, volume e distancia da EMA240 aparecerao aqui.")
+        self.details_filters_card.set_note("Os filtros aparecerão aqui.")
         content_layout.addWidget(self.details_filters_card)
 
         votes_card = QFrame()
@@ -1527,10 +1550,13 @@ class TraderBotLauncher(QMainWindow):
         """Interceta o fecho da janela para evitar processos zumbis e proteger posições abertas."""
         bot_running = self.run_process.state() != QProcess.NotRunning
         position_open = self.state.position_label in {"LONG", "SHORT"}
+        action_text = "reiniciar" if self._restart_requested else "fechar"
 
         if self._force_close_armed:
-            self._finalize_launcher_shutdown()
-            event.accept()
+            if self._finalize_launcher_shutdown():
+                event.accept()
+            else:
+                event.ignore()
             return
 
         if self._kill_switch_in_progress:
@@ -1545,29 +1571,33 @@ class TraderBotLauncher(QMainWindow):
         if bot_running or position_open:
             answer = QMessageBox.warning(
                 self,
-                "Fechar launcher",
-                "Fechar o launcher agora vai parar o bot local, mas nao vai zerar "
-                "automaticamente uma posicao aberta.\n\n"
-                "Se houver TP/SL nativo na Hyperliquid, a protecao permanece ativa na exchange.\n\n"
-                "Deseja continuar?",
+                "Reiniciar launcher" if self._restart_requested else "Fechar launcher",
+                f"Tem certeza que deseja {action_text} o launcher? O bot vai ser parado.",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
+                self._clear_restart_request()
                 event.ignore()
                 return
-            self._finalize_launcher_shutdown()
-            event.accept()
+            if self._finalize_launcher_shutdown():
+                event.accept()
+            else:
+                event.ignore()
             return
 
-        self._finalize_launcher_shutdown()
-        event.accept()
+        if self._finalize_launcher_shutdown():
+            event.accept()
+        else:
+            event.ignore()
 
-    def _finalize_launcher_shutdown(self) -> None:
+    def _finalize_launcher_shutdown(self) -> bool:
+        if self._restart_requested and not self._ensure_restart_helper_started():
+            return False
+
         self.health_timer.stop()
         self.runtime_state_timer.stop()
 
-        # Limpar requisicoes da IA que ficaram presas na fila e dar no maximo 1 segundo para terminarem
         self._thread_pool.clear()
         self._thread_pool.waitForDone(1000)
 
@@ -1582,6 +1612,7 @@ class TraderBotLauncher(QMainWindow):
             if not self.task_process.waitForFinished(2000):
                 self.task_process.kill()
                 self.task_process.waitForFinished(1000)
+        return True
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -1637,7 +1668,7 @@ class TraderBotLauncher(QMainWindow):
             run_label = "INICIANDO..."
             run_state = "starting"
         elif run_busy:
-            run_label = "BOT RODANDO"
+            run_label = "BOT ATIVO"
             run_state = "running"
         else:
             run_label = "INICIAR BOT"
@@ -1956,7 +1987,7 @@ class TraderBotLauncher(QMainWindow):
                 occurred_at=event.occurred_at,
                 severity="error",
                 event_code=event.event_code,
-                details="O launcher capturou a excecao e permaneceu aberto.",
+                details="O launcher capturou a exceção e permaneceu aberto.",
                 network=event.network,
                 symbol=event.symbol,
                 timeframe=event.timeframe,
@@ -1964,7 +1995,7 @@ class TraderBotLauncher(QMainWindow):
                 relevant=True,
                 fingerprint=f"launcher_internal:{context}:{type(exc).__name__}",
                 raw_detail=details,
-                execution_summary="Excecao interna capturada no launcher.",
+                execution_summary="Exceção interna capturada no launcher.",
                 simple_summary=summary,
             )
             self._push_event(event, prebuilt=prebuilt)
@@ -1989,7 +2020,7 @@ class TraderBotLauncher(QMainWindow):
             summary = "Bot parado após falha do runtime. Revise o erro para retomar a operação."
             style = "error"
         else:
-            summary = "Bot parado. Inicie o runtime para voltar a operar."
+            summary = "Bot parado | Inicie para voltar a operar."
             style = "blocked"
 
         self.state.state_label = "PARADO"
@@ -2008,7 +2039,7 @@ class TraderBotLauncher(QMainWindow):
                 native_tp_sl=self.state.native_tp_sl_status,
             )
         else:
-            self.state.position_status = "Bot parado. Nenhum runtime ativo."
+            self.state.position_status = "Bot Parado"
 
         self._refresh_dashboard()
         self._update_controls()
@@ -2046,22 +2077,22 @@ class TraderBotLauncher(QMainWindow):
                 self.health_state.bot_running = True
                 self.health_state.executor_alive = True
                 self.state.state_label = "INICIANDO"
-                self.state.state_message = "Runtime iniciado. Primeira avaliacao em andamento."
+                self.state.state_message = "Bot iniciando..."
                 self.state.state_style = "wait"
-                self.state.last_decision = "Runtime iniciado. Primeira avaliacao em andamento."
+                self.state.last_decision = "Bot iniciando..."
                 self.state.humanized_simple_summary = ""
                 self.state.humanized_execution_summary = ""
                 self.state.last_cycle_fingerprint = ""
                 if self.state.position_label not in {"LONG", "SHORT"}:
-                    self.state.position_status = "Aguardando primeira avaliacao do runtime."
+                    self.state.position_status = "Carregando Avaliação..."
                 self._update_controls()
                 self._refresh_dashboard()
                 self._push_event(
                     self._new_event(
                         source="launcher",
                         event_type="generic",
-                        raw_line="Runtime iniciado. Primeira avaliacao em andamento.",
-                        message="Runtime iniciado. Primeira avaliacao em andamento.",
+                        raw_line="Bot iniciando...",
+                        message="Bot iniciando...",
                         severity="info",
                         event_code="system.runtime_started",
                     )
@@ -2072,8 +2103,8 @@ class TraderBotLauncher(QMainWindow):
             event = self._new_event(
                 source="launcher",
                 event_type="generic",
-                raw_line="Parando runtime com posição aberta; a posição permanece na exchange com TP/SL nativo quando confirmado.",
-                message="Parando runtime com posição aberta; a posição permanece na exchange com TP/SL nativo quando confirmado.",
+                raw_line="Parando bot com posição aberta.",
+                message="Parando bot com posição aberta.",
                 severity="warning",
                 event_code="system.runtime_stop_requested_open_position",
             )
@@ -2114,6 +2145,8 @@ class TraderBotLauncher(QMainWindow):
             parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
+            if dialog.result() == SettingsDialog.RESTART_REQUESTED:
+                self._restart_launcher()
             return
 
         self.smoke_side = dialog.smoke_side()
@@ -2146,7 +2179,6 @@ class TraderBotLauncher(QMainWindow):
         raw["environment"]["regime_min_vol_regime_z"] = float(regime_min_vol_regime_z)
 
         raw.setdefault("launcher", {})
-        raw["launcher"].pop("openai_enabled", None)
         raw["launcher"]["auto_check_interval_seconds"] = int(auto_check_interval)
 
         with path.open("w", encoding="utf-8") as handle:
@@ -2160,15 +2192,7 @@ class TraderBotLauncher(QMainWindow):
             final_action = float(self.state.decision_snapshot.get("final_action", 0.0) or 0.0)
             self.state.signal_label = self._signal_label(final_action)
         self._refresh_dashboard()
-        key_name = self.cfg.launcher.openai_api_key_env or "OPENAI_API_KEY"
-        has_key = _has_env_value(key_name)
-        openai_status = (
-            "desativada"
-            if not self.cfg.launcher.openai_enabled
-            else "pronta"
-            if has_key
-            else "sem chave"
-        )
+    
         self._push_event(
             self._new_event(
                 source="launcher",
@@ -2179,12 +2203,106 @@ class TraderBotLauncher(QMainWindow):
                     f"filtro HOLD {self.cfg.environment.action_hold_threshold:.2f}, "
                     f"regime dist>={self.cfg.environment.regime_min_abs_dist_ema_240:.3f}, "
                     f"regime vol>={self.cfg.environment.regime_min_vol_regime_z:.2f}, "
-                    f"auto check {int(self.cfg.launcher.auto_check_interval_seconds)}s e OpenAI "
-                    f"{openai_status}."
+                    f"auto check {int(self.cfg.launcher.auto_check_interval_seconds)}s"
                 ),
                 event_code="system.settings_saved",
             )
         )
+
+    def _clear_restart_request(self) -> None:
+        self._restart_requested = False
+        self._restart_helper_started = False
+        self._restart_launch_program = None
+        self._restart_launch_args = []
+
+    def _launcher_restart_command(self) -> tuple[str, list[str]]:
+        original_argv = [str(part) for part in (getattr(sys, "orig_argv", []) or []) if str(part)]
+        if original_argv:
+            return original_argv[0], original_argv[1:]
+        return str(Path(sys.executable)), ["-m", "traderbot.launcher_entry"]
+
+    def _ensure_restart_helper_started(self) -> bool:
+        if self._restart_helper_started:
+            return True
+
+        program = self._restart_launch_program or str(Path(sys.executable))
+        args = list(self._restart_launch_args or ["-m", "traderbot.launcher_entry"])
+        helper_script = "\n".join(
+            [
+                "import os",
+                "import socket",
+                "import subprocess",
+                "import time",
+                f"program = {json.dumps(program)}",
+                f"args = {json.dumps(args)}",
+                f"repo = {json.dumps(str(REPO_ROOT))}",
+                "deadline = time.time() + 15.0",
+                "while time.time() < deadline:",
+                "    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
+                "    try:",
+                "        probe.bind(('127.0.0.1', 54321))",
+                "    except OSError:",
+                "        probe.close()",
+                "        time.sleep(0.25)",
+                "        continue",
+                "    probe.close()",
+                "    break",
+                "else:",
+                "    time.sleep(0.5)",
+                "kwargs = {",
+                "    'cwd': repo,",
+                "    'stdin': subprocess.DEVNULL,",
+                "    'stdout': subprocess.DEVNULL,",
+                "    'stderr': subprocess.DEVNULL,",
+                "}",
+                "if os.name == 'nt':",
+                "    kwargs['creationflags'] = (",
+                "        getattr(subprocess, 'DETACHED_PROCESS', 0)",
+                "        | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)",
+                "        | getattr(subprocess, 'CREATE_NO_WINDOW', 0)",
+                "    )",
+                "else:",
+                "    kwargs['start_new_session'] = True",
+                "subprocess.Popen([program, *args], **kwargs)",
+            ]
+        )
+
+        helper_kwargs: dict[str, Any] = {
+            "cwd": str(REPO_ROOT),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if os.name == "nt":
+            helper_kwargs["creationflags"] = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+        else:
+            helper_kwargs["start_new_session"] = True
+
+        try:
+            subprocess.Popen([str(Path(sys.executable)), "-c", helper_script], **helper_kwargs)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Reiniciar launcher",
+                f"Não foi possível agendar o reinício automático do launcher.\n\nDetalhes: {exc}",
+            )
+            self._clear_restart_request()
+            return False
+
+        self._restart_helper_started = True
+        return True
+
+    def _restart_launcher(self) -> None:
+        program, args = self._launcher_restart_command()
+        self._restart_requested = True
+        self._restart_helper_started = False
+        self._restart_launch_program = program
+        self._restart_launch_args = args
+        self.close()
 
     def _trigger_kill_switch(self) -> None:
         answer = QMessageBox.warning(
@@ -2273,7 +2391,7 @@ class TraderBotLauncher(QMainWindow):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode != 0:
-            fallback = "Falha ao listar outras instancias do Traderbot."
+            fallback = "Falha ao listar processos do Traderbot. Fechar outras instâncias manualmente recomendado."
             raise RuntimeError(self._stderr_summary_line(result.stderr or result.stdout, fallback=fallback))
 
         payload = (result.stdout or "").strip()
@@ -2332,8 +2450,8 @@ class TraderBotLauncher(QMainWindow):
                 self._new_event(
                     source="launcher",
                     event_type="generic",
-                    raw_line="Fechar outras instancias nao suportado fora do Windows.",
-                    message="Fechar outras instancias nao suportado fora do Windows.",
+                    raw_line="Fechar outras instâncias não suportado fora do Windows.",
+                    message="Fechar outras instâncias não suportado fora do Windows.",
                     severity="warning",
                     event_code="system.close_other_instances_unsupported",
                 )
@@ -2342,9 +2460,8 @@ class TraderBotLauncher(QMainWindow):
 
         answer = QMessageBox.warning(
             self,
-            "Fechar processos orfaos",
-            "Encerrar apenas processos orfaos do Traderbot e preservar todos os launchers abertos?\n\n"
-            "Esta janela, os processos filhos dela e qualquer outro launcher serao preservados.",
+            "Fechar outras instâncias do Traderbot",
+            "Está janela será preservada, mas outras janelas do Traderbot serão fechadas. Deseja continuar?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -2356,7 +2473,7 @@ class TraderBotLauncher(QMainWindow):
             processes = self._discover_traderbot_processes()
         except Exception as exc:
             self._report_launcher_internal_error(
-                context="listar outras instancias",
+                context="listar outras instâncias",
                 details=traceback.format_exc(),
                 exc=exc,
             )
@@ -2387,8 +2504,8 @@ class TraderBotLauncher(QMainWindow):
                 self._new_event(
                     source="launcher",
                     event_type="generic",
-                    raw_line="Nenhum processo orfao do Traderbot encontrado.",
-                    message="Nenhum processo orfao do Traderbot encontrado.",
+                    raw_line="Nenhuma outra instância está aberta.",
+                    message="Nenhuma outra instância do Traderbot encontrada.",
                     severity="info",
                     event_code="system.close_other_instances_empty",
                 )
@@ -2423,11 +2540,11 @@ class TraderBotLauncher(QMainWindow):
             )
             failures.append(summary)
 
-        severity = "warning" if failures else "info"
+        severity = "info" if failures else "info"
         message = (
-            f"Outras instancias encerradas: {len(terminated)}."
+            f"Instâncias encerradas: {len(terminated)}."
             if terminated
-            else "Nenhuma outra instancia foi encerrada."
+            else "Nenhuma instância foi encerrada."
         )
         if failures:
             message = f"{message} Falhas: {len(failures)}."
@@ -2580,7 +2697,7 @@ class TraderBotLauncher(QMainWindow):
 
         self._close_after_kill_requested = False
         self._shutdown_requires_flat_position = False
-        fallback = "Kill switch executado, mas a posicao ainda aparece aberta. O launcher permanecera aberto."
+        fallback = "Kill switch executado, mas a posiçao ainda aberta.."
         summary = fallback
         if exit_code != 0 and stderr_buffer.strip():
             summary = self._stderr_summary_line(stderr_buffer, fallback=fallback)
@@ -2627,9 +2744,9 @@ class TraderBotLauncher(QMainWindow):
             plain = self._strip_prefix(line)
             if "Iniciando pipeline com comando: run" in plain:
                 self.state.state_label = "RODANDO"
-                self.state.state_message = "Runtime ativo. Aguardando proximo ciclo."
+                self.state.state_message = "Aguardando proximo ciclo."
                 self.state.state_style = "wait"
-                self.state.last_decision = "Runtime iniciado. Aguardando proximo ciclo."
+                self.state.last_decision = "Aguardando proximo ciclo."
                 self._update_controls()
                 self._refresh_dashboard()
 
@@ -2704,7 +2821,7 @@ class TraderBotLauncher(QMainWindow):
             self.state.pnl_style = "muted"
         if connected and can_trade and not runtime_running:
             self.state.state_label = "PARADO"
-            self.state.state_message = "Conexao validada, mas o bot esta parado."
+            self.state.state_message = "Bot Parado"
             self.state.state_style = "blocked"
             if self.state.position_label in {"LONG", "SHORT"}:
                 self.state.position_status = self._position_status_text(
@@ -2713,7 +2830,7 @@ class TraderBotLauncher(QMainWindow):
                     native_tp_sl=self.state.native_tp_sl_status,
                 )
             else:
-                self.state.position_status = "Bot parado. Nenhum runtime ativo."
+                self.state.position_status = "Nenhuma Ordem Aberta"
         if connected and can_trade and not runtime_running and position_is_open:
             self.state.position_status = self._position_status_text(
                 self.state.position_label,
@@ -2769,7 +2886,7 @@ class TraderBotLauncher(QMainWindow):
     def _apply_manual_close_payload(self, payload: dict[str, Any], *, source: str) -> None:
         if payload.get("ok"):
             self.state.position_label = "FLAT"
-            self.state.position_status = "Sem posição aberta"
+            self.state.position_status = "Nenhuma Ordem Aberta"
             self.state.position_size_label = "--"
             self.state.entry_label = "--"
             self.state.take_profit_label = "--"
@@ -2779,7 +2896,7 @@ class TraderBotLauncher(QMainWindow):
             self.state.state_label = "AGUARDANDO"
             self.state.state_message = "Posição encerrada manualmente."
             self.state.state_style = "wait"
-            self.state.position_status = "Sem sinal ativo"
+            self.state.position_status = "Nenhuma Ordem Aberta"
             self._refresh_dashboard()
 
         ok = payload.get("ok")
@@ -2910,7 +3027,7 @@ class TraderBotLauncher(QMainWindow):
             widget.apply_summary(result)
             self._apply_humanized_cycle_details(result)
         except RuntimeError:
-            # O widget C++ ja foi destruido pelo _trim_notifications antes da IA terminar a traducao.
+            # O widget C++ já foi destruido pelo _trim_notifications antes da IA terminar a traducao.
             # Ignoramos silenciosamente para evitar crash do PySide6.
             pass
 
@@ -3132,23 +3249,33 @@ class TraderBotLauncher(QMainWindow):
             min_vol_regime_z = float(self.cfg.environment.regime_min_vol_regime_z)
         volume_passed = None if regime_vol is None else regime_vol > min_vol_regime_z
 
-        lines = [
-            (
-                f"HOLD: abs(acao final)={_optional_number(hold_strength, digits=4)} "
-                f"({_optional_pct(hold_strength, digits=2, signed=False)}) | "
-                f"regra=>= {hold_threshold:.4f} ({_pct(hold_threshold)}) | "
-                f"{self._filter_status_text(hold_passed)}"
-            ),
-            (
-                f"Volume (vol_regime_z): valor={_optional_number(regime_vol, digits=3, signed=True)} | "
-                f"regra=> {min_vol_regime_z:.3f} | {self._filter_status_text(volume_passed)}"
-            ),
-            (
-                f"Dist EMA240: bruto={_optional_pct(regime_dist_raw, digits=2, signed=True)} | "
-                f"abs usado={_optional_pct(regime_dist_abs, digits=2, signed=False)} | "
-                f"regra=>= {_pct(min_abs_dist_ema_240)} | {self._filter_status_text(ema_passed)}"
-            ),
-        ]
+        def _get_status_html(passed: bool | None) -> str:
+            if passed is None:
+                return '<span style="color: #888;">SEM DADO</span>'
+            return '<strong style="color: #4CAF50;">PASSOU</strong>' if passed else '<strong style="color: #F44336;">FALHOU</strong>'
+
+        html_table = f"""
+        <table width="100%" cellpadding="6" style="border-collapse: collapse; font-family: monospace;">
+            <tr>
+                <td width="30%"><b>HOLD</b></td>
+                <td width="25%">Valor: {_optional_pct(hold_strength, digits=2, signed=False)}</td>
+                <td width="25%">Meta: &gt;= {_pct(hold_threshold)}</td>
+                <td width="20%">{_get_status_html(hold_passed)}</td>
+            </tr>
+            <tr>
+                <td><b>Volume</b></td>
+                <td>Valor: {_optional_number(regime_vol, digits=3, signed=True)}</td>
+                <td>Meta: &gt; {min_vol_regime_z:.3f}</td>
+                <td>{_get_status_html(volume_passed)}</td>
+            </tr>
+            <tr>
+                <td><b>Dist EMA240</b></td>
+                <td>Valor: {_optional_pct(regime_dist_abs, digits=2, signed=False)}</td>
+                <td>Meta: &gt;= {_pct(min_abs_dist_ema_240)}</td>
+                <td>{_get_status_html(ema_passed)}</td>
+            </tr>
+        </table>
+        """
 
         failed_filters: list[str] = []
         if hold_passed is False:
@@ -3163,15 +3290,16 @@ class TraderBotLauncher(QMainWindow):
             or (self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else "")
             or ""
         ).strip()
+        
         if blocked_reason_human:
             note = f"Bloqueio atual: {blocked_reason_human}."
             if failed_filters:
                 note += f" Checks reprovados: {', '.join(failed_filters)}."
-            return "\n".join(lines), note
+            return html_table, note
 
         if failed_filters:
-            return "\n".join(lines), f"Checks reprovados nesta barra: {', '.join(failed_filters)}."
-        return "\n".join(lines), "Todos os checks desta barra passaram."
+            return html_table, f"Checks reprovados nesta barra: {', '.join(failed_filters)}."
+        return html_table, "Todos os checks desta barra passaram."
 
     def _apply_cycle_payload(self, payload: dict[str, Any], *, source: str) -> None:
         cycle_identity = self._cycle_identity(payload)
@@ -3189,6 +3317,13 @@ class TraderBotLauncher(QMainWindow):
         feature_snapshot = self._feature_snapshot_from_payload(payload)
         decision_snapshot = self._decision_snapshot_from_payload(payload)
         filter_snapshot = self._filter_snapshot_from_payload(payload)
+        blocked_reason = filter_snapshot.get("blocked_reason", payload.get("blocked_reason"))
+        silenced_cycle_issue = is_launcher_silenced_cycle_issue(payload, blocked_reason)
+        if silenced_cycle_issue:
+            filter_snapshot = dict(filter_snapshot)
+            filter_snapshot["blocked_reason"] = None
+            filter_snapshot["blocked_reason_human"] = None
+            blocked_reason = None
 
         self.state.market_snapshot = market_snapshot
         self.state.feature_snapshot = feature_snapshot
@@ -3197,9 +3332,9 @@ class TraderBotLauncher(QMainWindow):
 
         final_action = decision_snapshot.get("final_action", payload.get("final_action", 0.0))
         vote_bucket = decision_snapshot.get("vote_bucket", payload.get("vote_bucket", "--"))
-        blocked_reason = filter_snapshot.get("blocked_reason", payload.get("blocked_reason"))
-        manual_protection_required = bool(payload.get("manual_protection_required", False))
+        manual_protection_required = bool(payload.get("manual_protection_required", False)) and not silenced_cycle_issue
         manual_protection_message = str(payload.get("manual_protection_message") or "").strip()
+        payload_error = payload.get("error") if not silenced_cycle_issue else None
 
         self.state.reference_price = _optional_price(
             market_snapshot.get("reference_price", payload.get("reference_price", 0.0))
@@ -3236,13 +3371,13 @@ class TraderBotLauncher(QMainWindow):
         if manual_protection_required:
             self.state.state_label = "AVISO"
             self.state.state_message = (
-                manual_protection_message or "Protecao manual de TP/SL necessaria."
+                manual_protection_message or "Proteção manual de TP/SL necessária."
             )
             self.state.state_style = "blocked"
-        elif payload.get("error"):
+        elif payload_error:
             self.state.state_label = "ERRO"
             self.state.state_message = (
-                manual_protection_message or "Execucao com erro. Revisar operacao."
+                manual_protection_message or "Execução com erro. Revisar operação."
             )
             self.state.state_style = "error"
         elif blocked_reason:
@@ -3251,7 +3386,7 @@ class TraderBotLauncher(QMainWindow):
             self.state.state_style = "blocked"
         elif payload.get("position_is_open"):
             self.state.state_label = position_label
-            self.state.state_message = f"Posicao {position_label} em andamento."
+            self.state.state_message = f"Posição {position_label} em andamento."
             self.state.state_style = "long" if position_label == "LONG" else "short"
         elif self.state.signal_label == "HOLD":
             self.state.state_label = "AGUARDANDO"
@@ -3259,7 +3394,7 @@ class TraderBotLauncher(QMainWindow):
             self.state.state_style = "wait"
         else:
             self.state.state_label = "FLAT"
-            self.state.state_message = "Sem posicao aberta."
+            self.state.state_message = "Nenhuma Ordem Aberta"
             self.state.state_style = "flat"
 
         if payload.get("position_is_open"):
@@ -3269,12 +3404,12 @@ class TraderBotLauncher(QMainWindow):
                 native_tp_sl=native_tp_sl,
             )
         elif blocked_reason:
-            self.state.position_status = "Sem posicao; entrada bloqueada"
+            self.state.position_status = "Nenhuma Ordem Aberta"
         else:
-            self.state.position_status = "Sem sinal ativo"
+            self.state.position_status = "Nenhuma Ordem Aberta"
 
         if payload.get("opened_trade"):
-            summary_text = "Posição aberta com sucesso."
+            summary_text = "Posição aberta."
             self.state.operations_today_label = self._increment_counter_label(self.state.operations_today_label)
             self.state.last_trade_reason_label = summary_text
         elif payload.get("closed_trade"):
@@ -3284,6 +3419,8 @@ class TraderBotLauncher(QMainWindow):
             summary_text = self._human_block_label(str(blocked_reason))
             self.state.blocked_today_label = self._increment_counter_label(self.state.blocked_today_label)
             self.state.last_skip_reason_label = summary_text
+        elif silenced_cycle_issue and payload.get("position_is_open"):
+            summary_text = f"Posicao {position_label} em andamento."
         else:
             summary_text = "Ciclo concluído sem novas entradas."
             self.state.last_skip_reason_label = summary_text
@@ -3291,7 +3428,10 @@ class TraderBotLauncher(QMainWindow):
         self.state.last_decision = summary_text
         self.state.state_message = summary_text
         self._refresh_dashboard()
-        
+
+        if silenced_cycle_issue:
+            return
+
         event = self._new_event(
             source=source,
             event_type="cycle",
@@ -3366,9 +3506,9 @@ class TraderBotLauncher(QMainWindow):
             reason = str(dec_snap.get("reason", self.state.last_decision))
 
             self.details_final_action.setText(
-                f"Direção: {direction} | Sinal de Força: {_strength(final_action)}"
+                f"Consenso: {direction} | Força do sinal: {_strength(final_action)}"
             )
-            self.details_decision_reason.setText(f"Diagnóstico: {reason}")
+            self.details_decision_reason.setText(reason)
         else:
             self.details_final_action.setText("Aguardando próximo ciclo...")
             self.details_decision_reason.setText("Nenhum dado recebido ainda.")
@@ -3379,8 +3519,6 @@ class TraderBotLauncher(QMainWindow):
         filter_summary, filter_note = self._build_filter_details_summary()
         self.details_filters_card.set_summary(filter_summary)
         self.details_filters_card.set_note(filter_note)
-
-        self.details_vote_timestamp.setText(f"Atualizado às: {self.state.last_update_label}")
 
         while self.details_votes_container.count():
             item = self.details_votes_container.takeAt(0)
@@ -3429,15 +3567,17 @@ class TraderBotLauncher(QMainWindow):
                 val_float = _safe_float(vote_value)
                 if val_float is not None:
                     tamanho_voto = f"{val_float * 100.0:+.1f}"
+                    # Vai buscar o valor salvo nas definições (ex: 0.60)
+                    hold_threshold = float(self.cfg.environment.action_hold_threshold)
 
-                    if val_float >= 0.05:
-                        v_text = f"COMPRA ({tamanho_voto})"
+                    if val_float >= hold_threshold:
+                        v_text = f"LONG({tamanho_voto})"
                         tone = "success"
-                    elif val_float <= -0.05:
-                        v_text = f"VENDA ({tamanho_voto})"
+                    elif val_float <= -hold_threshold:
+                        v_text = f"SHORT({tamanho_voto})"
                         tone = "error"
                     else:
-                        v_text = f"HOLD ({tamanho_voto})"
+                        v_text = f"HOLD({tamanho_voto})"
                         tone = "muted"
                 else:
                     v_text = str(vote_value)
@@ -3502,39 +3642,33 @@ class TraderBotLauncher(QMainWindow):
         native_tp_sl: dict[str, Any] | None = None,
     ) -> str:
         if position_label not in {"LONG", "SHORT"}:
-            return "Sem sinal ativo" if runtime_running else "Bot parado. Nenhum runtime ativo."
+            return "Sem sinal ativo" if runtime_running else "Bot Parado"
 
         protection = dict(native_tp_sl or {})
         native_enabled = bool(protection.get("enabled", False))
         fully_protected = bool(protection.get("is_fully_protected", False))
 
         if runtime_running:
-            if native_enabled and fully_protected:
-                return f"{position_label} aberta com TP/SL nativo ativo"
             if native_enabled:
-                return f"{position_label} aberta sem TP/SL nativo confirmado"
-            return f"{position_label} aberta no momento"
+                return f"Ordem Aberta"
+    
 
-        if native_enabled and fully_protected:
-            return f"Bot parado; posição {position_label} protegida por TP/SL nativo na Hyperliquid."
         if native_enabled:
-            return f"Bot parado; posição {position_label} aberta sem TP/SL nativo confirmado."
-        return f"Bot parado; posição {position_label} aberta na exchange."
+            return f"Ordem Aberta"
 
     def _human_block_label(self, reason: str) -> str:
         mapping = {
-            "regime_filter": "Entrada bloqueada pelo filtro de regime",
+            "regime_filter": "Entrada bloqueada pelo filtro",
             "cooldown": "Entrada bloqueada pelo cooldown",
-            "force_exit_only_by_tp_sl": "Sinal ignorado: posição travada por TP/SL",
-            "min_notional_risk": "Entrada pulada por risco mínimo x notional",
-            "exchange_position_present": "Entrada ignorada: posição já existe",
-            "duplicate_cycle_order": "Entrada ignorada para evitar ordem duplicada",
+            "force_exit_only_by_tp_sl": "Sinal ignorado: Ordem aberta",
+            "min_notional_risk": "Entrada pulada por ser abaixo do valor mínimo da corretora",
+            "exchange_position_present": "Ordem ignorada por posição já presente na corretora",
+            "duplicate_cycle_order": "Ordem ignorada para evitar ordem duplicada",
         }
         mapping.update(
             {
                 "order_cooldown": "Entrada bloqueada pelo cooldown entre ordens",
-                "open_position_locked": "Sinal ignorado: posição já aberta e protegida por TP/SL",
-                "native_tp_sl_unprotected": "Posição aberta sem TP/SL nativo confirmado na Hyperliquid",
+                "open_position_locked": "Sinal ignorado: Ordem aberta.",
                 "duplicate_cycle": "Entrada ignorada para evitar ordem duplicada na mesma vela",
             }
         )
@@ -3555,7 +3689,7 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
     _launcher_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
-        # Tenta travar a porta para garantir que e a unica instancia
+        # Tenta travar a porta para garantir que e a unica instância
         _launcher_lock.bind(("127.0.0.1", 54321))
         # Se conseguiu, salva o PID atual no arquivo
         with open(pid_file, "w") as f:
@@ -3569,15 +3703,15 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
             except ValueError:
                 pass
 
-        msg = "O TraderBot Launcher ja esta rodando (provavelmente preso invisivel em segundo plano).\n\n"
+        msg = "O TraderBot Launcher já esta rodando!\n\n"
         if old_pid:
-            msg += f"Deseja forcar o encerramento da instancia fantasma (PID: {old_pid}) para liberar o sistema?"
+            msg += f"Deseja forçar o encerramento da instância fantasma (PID: {old_pid}) para liberar o sistema?"
         else:
-            msg += "Nao encontrei o PID para matar automaticamente. Voce tera que fechar o 'pythonw.exe' pelo Gerenciador de Tarefas do Windows."
+            msg += "Não encontrei o PID para matar automaticamente. Você terá que fechar o 'pythonw.exe' pelo Gerenciador de Tarefas do Windows."
 
         answer = QMessageBox.warning(
             None,
-            "Instancia Fantasma Detectada",
+            "Instância Fantasma Detectada",
             msg,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -3596,13 +3730,13 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
                 QMessageBox.information(
                     None,
                     "Resolvido",
-                    "Instancia fantasma encerrada com sucesso!\nVoce ja pode abrir o Launcher normalmente.",
+                    "Instância fantasma encerrada com sucesso!\nVoce já pode abrir o Launcher normalmente.",
                 )
             except Exception as e:
                 QMessageBox.critical(
                     None,
                     "Erro",
-                    f"Nao foi possivel matar o processo fantasma.\nDetalhes: {e}\n\nAbra o Gerenciador de Tarefas (Ctrl+Shift+Esc), procure por 'pythonw.exe' e finalize a tarefa manualmente.",
+                    f"Não foi possivel matar o processo fantasma.\nDetalhes: {e}\n\nAbra o terminal e execute 'taskkill /F /IM pythonw.exe /T ´{old_pid} e taskkill /F /IM python.exe /T {old_pid}' para encerrar manualmente."
                 )
         return 1
 

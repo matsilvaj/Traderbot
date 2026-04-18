@@ -53,6 +53,12 @@ QFrame#AdvancedFrame {
     border: none;
 }
 
+QScrollArea#SettingsScroll,
+QWidget#SettingsScrollContent {
+    background: transparent;
+    border: none;
+}
+
 QPushButton {
     background-color: transparent;
     border: 1px solid #1F2933;

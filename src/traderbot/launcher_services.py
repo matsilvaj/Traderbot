@@ -89,6 +89,40 @@ STATE_COLORS = {
 }
 
 
+LAUNCHER_SILENCED_BLOCK_REASONS = frozenset(
+    {
+        "native_tp_sl_unprotected",
+        "open_position_locked",
+        "exchange_position_present",
+        "duplicate_cycle",
+        "duplicate_cycle_order",
+    }
+)
+
+
+def is_launcher_silenced_cycle_issue(payload: dict[str, Any] | None = None, blocked_reason: Any = None) -> bool:
+    payload_data = payload if isinstance(payload, dict) else {}
+    reason_value = blocked_reason if blocked_reason is not None else payload_data.get("blocked_reason")
+    reason = str(reason_value or "").strip().lower()
+    if reason in LAUNCHER_SILENCED_BLOCK_REASONS:
+        return True
+    if bool(payload_data.get("manual_protection_required", False)):
+        return True
+
+    details_blob = " ".join(
+        str(value or "").strip().lower()
+        for value in (
+            payload_data.get("error"),
+            payload_data.get("manual_protection_message"),
+        )
+        if str(value or "").strip()
+    )
+    return any(
+        fragment in details_blob
+        for fragment in ("tp/sl", "tp sl", "native tp", "manual protection")
+    )
+
+
 AI_HUMANIZED_DETAILS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -179,6 +213,32 @@ class LocalLogInterpreter:
         model_interpretation = self._cycle_model_interpretation(payload)
         filters_diagnostic = self._cycle_filters_diagnostic(payload)
         execution_summary = self._cycle_execution_summary(payload)
+        blocked_reason = str(payload.get("blocked_reason") or "").strip().lower()
+        if is_launcher_silenced_cycle_issue(payload, blocked_reason):
+            position_label = str(payload.get("position_label", payload.get("trade_direction", "FLAT"))).upper()
+            position_is_open = bool(payload.get("position_is_open"))
+            simple_summary = (
+                f"Posicao {position_label} em andamento."
+                if position_is_open
+                else "Ciclo concluido sem novas entradas."
+            )
+            scrubbed_payload = dict(payload)
+            scrubbed_payload["blocked_reason"] = None
+            return self._build(
+                event,
+                severity="execution" if position_is_open else "info",
+                message=simple_summary,
+                details=None,
+                fingerprint=f"cycle:silenced:{blocked_reason or 'manual_protection'}:{cycle_key}",
+                event_code="execution.position_held" if position_is_open else "runtime.no_entry",
+                relevant=False,
+                market_state=market_state,
+                model_interpretation=model_interpretation,
+                filters_diagnostic=self._cycle_filters_diagnostic(scrubbed_payload),
+                execution_summary=execution_summary,
+                simple_summary=simple_summary,
+            )
+
         if payload.get("error"):
             return self._build(
                 event,
