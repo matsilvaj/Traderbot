@@ -581,7 +581,6 @@ class NotificationItemWidget(QFrame):
         self.severity_badge.setObjectName("badge")
         top.addWidget(self.severity_badge, 0, Qt.AlignLeft)
 
-        self.time_label = QLabel("--:--")
         self.time_label.setObjectName("metaLabel")
         top.addWidget(self.time_label)
 
@@ -3254,24 +3253,33 @@ class TraderBotLauncher(QMainWindow):
                 return '<span style="color: #888;">SEM DADO</span>'
             return '<strong style="color: #4CAF50;">PASSOU</strong>' if passed else '<strong style="color: #F44336;">FALHOU</strong>'
 
+        hold_val = f"{hold_strength * 100.0:.2f}" if hold_strength is not None else "--"
+        hold_meta = f"{hold_threshold * 100.0:.2f}"
+        
+        vol_val = _optional_number(regime_vol, digits=2, signed=True)
+        vol_meta = f"{min_vol_regime_z:.2f}"
+        
+        ema_val = f"{regime_dist_abs * 100.0:.2f}" if regime_dist_abs is not None else "--"
+        ema_meta = f"{min_abs_dist_ema_240 * 100.0:.2f}"
+
         html_table = f"""
         <table width="100%" cellpadding="6" style="border-collapse: collapse; font-family: monospace;">
             <tr>
                 <td width="30%"><b>HOLD</b></td>
-                <td width="25%">Valor: {_optional_pct(hold_strength, digits=2, signed=False)}</td>
-                <td width="25%">Meta: &gt;= {_pct(hold_threshold)}</td>
+                <td width="25%">{hold_meta}</td>
+                <td width="25%">{hold_val}</td>
                 <td width="20%">{_get_status_html(hold_passed)}</td>
             </tr>
             <tr>
                 <td><b>Volume</b></td>
-                <td>Valor: {_optional_number(regime_vol, digits=3, signed=True)}</td>
-                <td>Meta: &gt; {min_vol_regime_z:.3f}</td>
+                <td>{vol_meta}</td>
+                <td>{vol_val}</td>
                 <td>{_get_status_html(volume_passed)}</td>
             </tr>
             <tr>
                 <td><b>Dist EMA240</b></td>
-                <td>Valor: {_optional_pct(regime_dist_abs, digits=2, signed=False)}</td>
-                <td>Meta: &gt;= {_pct(min_abs_dist_ema_240)}</td>
+                <td>{ema_meta}</td>
+                <td>{ema_val}</td>
                 <td>{_get_status_html(ema_passed)}</td>
             </tr>
         </table>
