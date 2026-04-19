@@ -40,13 +40,13 @@ _bot_lock: socket.socket | None = None
 
 
 def _acquire_bot_lock() -> None:
-    global _bot_lock  # Mantem a referencia viva na memoria
+    global _bot_lock  # Mantém a referência viva na memória
     _bot_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         _bot_lock.bind(("127.0.0.1", 54322))
     except socket.error:
-        print("\n[ERRO CRITICO] O Bot ja esta em execucao em outro terminal ou pelo Launcher!")
-        print("Feche a outra instancia antes de iniciar uma nova para evitar ordens duplicadas.\n")
+        print("\n[ERRO CRÍTICO] O Bot já está em execução em outro terminal ou pelo Launcher!")
+        print("Feche a outra instância antes de iniciar uma nova para evitar ordens duplicadas.\n")
         sys.exit(1)
 
 
@@ -929,13 +929,13 @@ def _safe_notifier_call(
     try:
         method = getattr(notifier, method_name)
     except AttributeError:
-        logger.error("TelegramNotifier nao possui o metodo %s.", method_name)
+        logger.error("TelegramNotifier não possui o método %s.", method_name)
         return False
 
     try:
         return bool(method(*args, **kwargs))
     except Exception:
-        logger.exception("Falha ao executar notificacao Telegram (%s).", method_name)
+        logger.exception("Falha ao executar notificação Telegram (%s).", method_name)
         return False
 
 
@@ -982,12 +982,12 @@ def _close_open_position_on_shutdown(
     try:
         snapshot = executor.get_position_snapshot()
     except Exception as exc:
-        logger.exception("Falha ao consultar posicao no encerramento do runtime.")
+        logger.exception("Falha ao consultar posição no encerramento do runtime.")
         _safe_notifier_call(
             logger,
             notifier,
             "notify_critical_error",
-            "Falha ao verificar posicao aberta no encerramento do Traderbot",
+            "Falha ao verificar posição aberta no encerramento do Traderbot",
             f"{type(exc).__name__}: {exc}",
             status="Offline",
         )
@@ -1012,7 +1012,7 @@ def _close_open_position_on_shutdown(
                 logger,
                 notifier,
                 "notify_critical_error",
-                "Posicao aberta sem confirmacao de TP/SL nativo na parada do Traderbot",
+                "Posição aberta sem confirmação de TP/SL nativo na parada do Traderbot",
                 f"{type(exc).__name__}: {exc}",
                 status="Offline",
             )
@@ -1020,14 +1020,14 @@ def _close_open_position_on_shutdown(
 
         if bool(protection_result.get("ok", False)) and bool(protection_result.get("is_fully_protected", False)):
             logger.warning(
-                "Runtime encerrando com posicao aberta protegida por TP/SL nativo; mantendo posicao na exchange | trigger=%s | protection=%s",
+                "Runtime encerrando com posição aberta protegida por TP/SL nativo; mantendo posição na exchange | trigger=%s | protection=%s",
                 trigger,
                 json.dumps(protection_result, ensure_ascii=False),
             )
             return False
 
         logger.error(
-            "Runtime encerrando com posicao aberta sem TP/SL nativo confirmado; mantendo posicao aberta para evitar zeragem automatica | trigger=%s | snapshot=%s | protection=%s",
+            "Runtime encerrando com posição aberta sem TP/SL nativo confirmado; mantendo posição aberta para evitar zeragem automática | trigger=%s | snapshot=%s | protection=%s",
             trigger,
             json.dumps(snapshot, ensure_ascii=False),
             json.dumps(protection_result, ensure_ascii=False),
@@ -1036,17 +1036,17 @@ def _close_open_position_on_shutdown(
             logger,
             notifier,
             "notify_critical_error",
-            "Posicao aberta sem TP/SL nativo confirmado na parada do Traderbot",
+            "Posição aberta sem TP/SL nativo confirmado na parada do Traderbot",
             str(
                 protection_result.get("error")
-                or "A posicao permaneceu aberta e precisa de verificacao manual na exchange."
+                or "A posição permaneceu aberta e precisa de verificação manual na exchange."
             ),
             status="Offline",
         )
         return True
 
     logger.warning(
-        "Runtime encerrando com posicao aberta; tentando fechar | trigger=%s | snapshot=%s",
+        "Runtime encerrando com posição aberta; tentando fechar | trigger=%s | snapshot=%s",
         trigger,
         json.dumps(snapshot, ensure_ascii=False),
     )
@@ -1054,18 +1054,18 @@ def _close_open_position_on_shutdown(
     try:
         close_result = executor.close_open_position(trigger=trigger)
     except Exception as exc:
-        logger.exception("Falha ao fechar posicao no encerramento do runtime.")
+        logger.exception("Falha ao fechar posição no encerramento do runtime.")
         _safe_notifier_call(
             logger,
             notifier,
             "notify_critical_error",
-            "Falha ao fechar posicao na parada do Traderbot",
+            "Falha ao fechar posição na parada do Traderbot",
             f"{type(exc).__name__}: {exc}",
             status="Offline",
         )
         return True
 
-    logger.info("Fechamento de seguranca do runtime | %s", json.dumps(close_result, ensure_ascii=False))
+    logger.info("Fechamento de segurança do runtime | %s", json.dumps(close_result, ensure_ascii=False))
 
     if bool(close_result.get("closed_position", False)):
         _notify_position_closed_from_result(cfg, close_result, logger, notifier)
@@ -1075,8 +1075,8 @@ def _close_open_position_on_shutdown(
         logger,
         notifier,
         "notify_critical_error",
-        "Falha ao fechar posicao na parada do Traderbot",
-        str(close_result.get("error") or close_result.get("message") or "Posicao permaneceu aberta."),
+        "Falha ao fechar posição na parada do Traderbot",
+        str(close_result.get("error") or close_result.get("message") or "Posição permaneceu aberta."),
         status="Offline",
     )
     return True
@@ -1709,7 +1709,7 @@ def run_execution_pipeline(
             sleep_until_next_cycle(cfg.hyperliquid.timeframe)
     except KeyboardInterrupt as exc:
         shutdown_trigger = "shutdown_signal"
-        logger.info("Encerramento do runtime solicitado por interrupcao/sinal: %s", exc)
+        logger.info("Encerramento do runtime solicitado por interrupção/sinal: %s", exc)
         raise
     except SystemExit:
         shutdown_trigger = "shutdown_signal"
@@ -2016,7 +2016,7 @@ def parse_args():
     p_run.add_argument("--model-path", type=str, default=None, help="Caminho do modelo .zip")
     p_guard = sub.add_parser(
         "runtime-guard",
-        help="Monitora o heartbeat do runtime e fecha posicao se o processo morrer inesperadamente",
+        help="Monitora o heartbeat do runtime e fecha posição se o processo morrer inesperadamente",
     )
     p_guard.add_argument(
         "--state-path",
@@ -2081,7 +2081,7 @@ def main():
                 logger.info("Tabelas PostgreSQL verificadas/inicializadas com sucesso.")
             except Exception:
                 logger.info(
-                    "PostgreSQL indisponivel. Persistencia em banco desativada nesta execucao: %s",
+                    "PostgreSQL indisponível. Persistência em banco desativada nesta execução: %s",
                     database_unavailable_reason() or "erro de conexao",
                 )
 
@@ -2143,13 +2143,13 @@ def main():
             logger,
             notifier,
             "notify_critical_error",
-            "Falha critica no arranque/execucao do Traderbot",
+            "Falha crítica no arranque/execução do Traderbot",
             f"{type(exc).__name__}: {exc}",
             status="Offline",
         )
         raise
     except KeyboardInterrupt:
-        logger.info("Traderbot encerrado por interrupcao.")
+        logger.info("Traderbot encerrado por interrupção.")
     finally:
         uninstall_fatal_error_hooks(fault_handle, logger=logger)
 

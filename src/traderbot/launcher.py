@@ -569,7 +569,7 @@ class NotificationItemWidget(QFrame):
         self.message_label.setObjectName("notificationMessage")
         _configure_dynamic_label(self.message_label)
         layout.addWidget(self.message_label)
-        self.setToolTip("Ver log tecnico")
+        self.setToolTip("Ver log técnico")
 
     def apply_summary(self, summary: HumanizedEvent) -> None:
         self.summary = summary
@@ -721,7 +721,7 @@ class SettingsDialog(QDialog):
         form.setColumnStretch(0, 1)
         form.setColumnStretch(1, 2)
 
-        form.addWidget(self._field_label("Risco maximo por trade"), 0, 0)
+        form.addWidget(self._field_label("Risco máximo por trade"), 0, 0)
         form.addWidget(self.risk_input, 0, 1)
         form.addWidget(self._field_label("Filtro HOLD"), 1, 0)
         form.addWidget(self.hold_threshold_input, 1, 1)
@@ -1441,7 +1441,7 @@ class TraderBotLauncher(QMainWindow):
             self._position_toast(self._active_toast)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        """Interceta o fecho da janela para evitar processos zumbis e proteger posições abertas."""
+        """Intercepta o fechamento da janela para evitar processos zumbis e proteger posições abertas."""
         bot_running = self.run_process.state() != QProcess.NotRunning
         position_open = self.state.position_label in {"LONG", "SHORT"}
         action_text = "reiniciar" if self._restart_requested else "fechar"
@@ -1813,7 +1813,7 @@ class TraderBotLauncher(QMainWindow):
         event_code: str,
         show_dialog: bool,
     ) -> None:
-        fallback = f"{process_label} finalizado com codigo {exit_code}."
+        fallback = f"{process_label} finalizado com código {exit_code}."
         summary = self._stderr_summary_line(stderr_buffer, fallback=fallback)
         event = self._new_event(
             source=source,
@@ -2001,7 +2001,7 @@ class TraderBotLauncher(QMainWindow):
         self._update_controls()
         self.run_process.terminate()
 
-        # Fallback de seguranca para garantir o encerramento apos 3 segundos se o terminate falhar
+        # Fallback de segurança para garantir o encerramento após 3 segundos se o terminate falhar
         QTimer.singleShot(
             3000,
             lambda: self.run_process.kill() if self.run_process.state() != QProcess.NotRunning else None,
@@ -3103,7 +3103,7 @@ class TraderBotLauncher(QMainWindow):
         dec_snap = self.state.decision_snapshot if isinstance(self.state.decision_snapshot, dict) else {}
         filter_snap = self.state.filter_snapshot if isinstance(self.state.filter_snapshot, dict) else {}
         if not dec_snap and not filter_snap:
-            return "Aguardando proximo ciclo...", "Nenhum dado recebido ainda."
+            return "Aguardando próximo ciclo...", "Nenhum dado recebido ainda."
 
         thresholds = filter_snap.get("regime_thresholds")
         if not isinstance(thresholds, dict):
@@ -3664,13 +3664,13 @@ def _run_launcher_with_pid_lock(app: QApplication) -> int:
                 QMessageBox.information(
                     None,
                     "Resolvido",
-                    "Instância fantasma encerrada com sucesso!\nVoce já pode abrir o Launcher normalmente.",
+                    "Instância fantasma encerrada com sucesso!\nVocê já pode abrir o Launcher normalmente.",
                 )
             except Exception as e:
                 QMessageBox.critical(
                     None,
                     "Erro",
-                    f"Não foi possivel matar o processo fantasma.\nDetalhes: {e}\n\nAbra o terminal e execute 'taskkill /F /IM pythonw.exe /T {old_pid} e taskkill /F /IM python.exe /T {old_pid}' para encerrar manualmente."
+                    f"Não foi possível matar o processo fantasma.\nDetalhes: {e}\n\nAbra o terminal e execute 'taskkill /F /IM pythonw.exe /T {old_pid} e taskkill /F /IM python.exe /T {old_pid}' para encerrar manualmente."
                 )
         return 1
 
