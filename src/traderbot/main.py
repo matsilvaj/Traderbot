@@ -1082,6 +1082,8 @@ def _close_open_position_on_shutdown(
     return True
 
 
+_win_ctrl_handler_routine = None
+
 def _install_runtime_signal_handlers(logger) -> dict[signal.Signals, Any]:
     previous_handlers: dict[signal.Signals, Any] = {}
 
@@ -1099,6 +1101,22 @@ def _install_runtime_signal_handlers(logger) -> dict[signal.Signals, Any]:
             continue
         previous_handlers[current_signal] = signal.getsignal(current_signal)
         signal.signal(current_signal, _handle_shutdown_signal)
+
+    import os
+    if os.name == "nt":
+        import ctypes
+        import _thread
+        global _win_ctrl_handler_routine
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+        def console_ctrl_handler(ctrl_type):
+            if ctrl_type in (0, 1, 2, 5, 6):
+                _thread.interrupt_main()
+                return True
+            return False
+
+        _win_ctrl_handler_routine = console_ctrl_handler
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_win_ctrl_handler_routine, True)
 
     return previous_handlers
 
@@ -1129,55 +1147,24 @@ def _handle_runtime_side_effects(
     open_amount = _as_float(result.get("position_size", result.get("volume", result.get("adjusted_volume", 0.0))))
     sizing = result.get("sizing") or {}
     open_notional = _as_float(sizing.get("adjusted_notional"))
+    
     if open_notional <= 0 and open_price > 0 and open_amount > 0:
         open_notional = open_price * open_amount
 
-    manual_protection_required = bool(result.get("manual_protection_required", False)) or (
-        str(result.get("blocked_reason") or "").strip().lower() == "native_tp_sl_unprotected"
-        and int(position_snapshot.get("side", 0) or 0) != 0
-    )
-    if not manual_protection_required:
-        setattr(_handle_runtime_side_effects, "_last_manual_tp_sl_alert_key", None)
-
-    if manual_protection_required and notifier is not None:
-        alert_side = open_side or ("buy" if int(position_snapshot.get("side", 0) or 0) > 0 else "sell")
-        alert_key = (
-            symbol,
-            alert_side,
-            round(open_price, 8),
-            round(_as_float(result.get("take_profit_price")), 8),
-            round(_as_float(result.get("stop_loss_price")), 8),
-        )
-        last_alert_key = getattr(_handle_runtime_side_effects, "_last_manual_tp_sl_alert_key", None)
-        if alert_key != last_alert_key:
+    # Envia notificação de abertura de posição
+    if bool(result.get("opened_position", False)):
+        if notifier is not None and open_side in {"buy", "sell"} and open_price > 0 and open_amount > 0:
             _safe_notifier_call(
                 logger,
                 notifier,
-                "notify_manual_tp_sl_required",
+                "notify_order_executed",
                 asset=symbol,
-                side=alert_side,
-                entry_price=open_price if open_price > 0 else None,
-                tp=result.get("take_profit_price"),
-                sl=result.get("stop_loss_price"),
+                side=open_side,
+                price=open_price,
+                quantity=open_notional if open_notional > 0 else open_amount,
             )
-            setattr(_handle_runtime_side_effects, "_last_manual_tp_sl_alert_key", alert_key)
 
-    if bool(result.get("opened_position", False)):
-        manual_protection_required = bool(result.get("manual_protection_required", False))
-        if notifier is not None and open_side in {"buy", "sell"} and open_price > 0 and open_amount > 0:
-            if not manual_protection_required:
-                _safe_notifier_call(
-                    logger,
-                    notifier,
-                    "notify_order_executed",
-                    asset=symbol,
-                    side=open_side,
-                    price=open_price,
-                    quantity=open_notional if open_notional > 0 else open_amount,
-                    tp=result.get("take_profit_price"),
-                    sl=result.get("stop_loss_price"),
-                )
-
+    # Envia notificação de fechamento
     if bool(result.get("closed_position", False)):
         _notify_position_closed_from_result(cfg, result, logger, notifier)
 
@@ -1729,10 +1716,14 @@ def run_execution_pipeline(
             shutdown_trigger=shutdown_trigger,
         )
         _restore_runtime_signal_handlers(previous_signal_handlers)
+            
         if executor_connected:
             shutdown_had_error = _close_open_position_on_shutdown(cfg, executor, logger, notifier, shutdown_trigger)
-            if notifier is not None and shutdown_trigger != "shutdown_after_error" and not shutdown_had_error:
-                _safe_notifier_call(logger, notifier, "notify_stopped")
+            
+        if notifier is not None and shutdown_trigger != "shutdown_after_error":
+            _safe_notifier_call(logger, notifier, "notify_stopped")
+            time.sleep(1.0) # Aguarda 1s para o Telegram enviar a mensagem
+            
         executor.disconnect()
         heartbeat.stop(
             final_status="stopped_after_error" if shutdown_trigger == "shutdown_after_error" else "stopped",

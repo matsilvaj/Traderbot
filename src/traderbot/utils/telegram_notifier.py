@@ -50,19 +50,12 @@ class TelegramNotifier:
         side: str,
         price: float | int,
         quantity: float | int,
-        tp: float | int | None = None,
-        sl: float | int | None = None,
     ) -> bool:
         lines = [
             f"ENTRADA {self._normalize_entry_side_label(side)}",
             f"Quantidade: ${self._format_brl_number(quantity, places=2)}",
-            f"Preco: ${self._format_brl_number(price, places=2)}",
+            f"Preço: ${self._format_brl_number(price, places=2)}",
         ]
-        if tp not in (None, ""):
-            lines.append(f"TP: ${self._format_brl_number(tp, places=2)}")
-        if sl not in (None, ""):
-            lines.append(f"SL: ${self._format_brl_number(sl, places=2)}")
-
         return self._send_message("\n".join(lines))
 
     def notify_position_closed(
@@ -87,43 +80,17 @@ class TelegramNotifier:
 
         return self._send_message("\n".join(lines))
 
-    def notify_manual_tp_sl_required(
-        self,
-        *,
-        asset: str,
-        side: str | None = None,
-        entry_price: float | int | None = None,
-        tp: float | int | None = None,
-        sl: float | int | None = None,
-    ) -> bool:
-        lines = [
-            "ALERTA TP/SL",
-            "Não consegui criar o gatilho de SL e TP",
-            "Precisa configurar manualmente.",
-        ]
-        if entry_price not in (None, ""):
-            lines.append(f"Entrada: ${self._format_brl_number(entry_price, places=2)}")
-        if tp not in (None, ""):
-            lines.append(f"TP: 5%")
-        if sl not in (None, ""):
-            lines.append(f"SL: 2%")
-        return self._send_message("\n".join(lines))
-
     def notify_stopped(self, reason: str | None = None) -> bool:
         return self._send_message("Offline")
 
     def notify_critical_error(
         self,
-        error_message: str = "Erro no Traderbot",
+        error_message: str | None = None,
         details: str | None = None,
         *,
-        status: str = "Offline",
+        status: str | None = None,
     ) -> bool:
-        lines = [
-            "ERRO",
-            f"Status: {self._normalize_runtime_status(status)}",
-        ]
-        return self._send_message("\n".join(lines))
+        return self._send_message("Erro\nStatus: Offline")
 
     def _send_message(self, text: str) -> bool:
         if not self.enabled:
