@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from matplotlib import category
 from traderbot.utils.logger import setup_logger
 from traderbot.utils.telegram_notifier import TelegramNotifier
 
@@ -873,6 +875,8 @@ class TraderBotLauncher(QMainWindow):
         self._task_stderr_buffer = ""
         self._last_cycle_identity: str | None = None
         self.notifier = TelegramNotifier(logger=setup_logger("launcher-notifier", self.cfg.paths.logs_dir))
+        self.terminal_logs: list[dict[str, str]] = [] # Guarda {tipo, msg}
+        self.current_terminal_filter = "ALL"
         
 
         self.run_process = self._build_process(
@@ -1301,7 +1305,6 @@ class TraderBotLauncher(QMainWindow):
 
     def _build_terminal_tab(self) -> QWidget:
         tab = QWidget()
-        tab.setObjectName("TerminalTab")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
@@ -1309,39 +1312,36 @@ class TraderBotLauncher(QMainWindow):
         terminal_card = QFrame()
         terminal_card.setObjectName("PositionCard")
         terminal_layout = QVBoxLayout(terminal_card)
-        terminal_layout.setContentsMargins(18, 16, 18, 16)
-        terminal_layout.setSpacing(10)
 
-        header = QHBoxLayout()
-        header.setSpacing(10)
-
-        title = QLabel("Terminal")
-        title.setObjectName("PanelTitle")
-        header.addWidget(title)
-        header.addStretch(1)
-
-        self.clear_terminal_button = QPushButton("Limpar Terminal")
+        # Barra de Filtros
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(8)
+        
+        self.filter_buttons = {}
+        filters = [("ALL", "Todos"), ("SYSTEM", "Sistema"), ("IA", "Modelos/IA"), ("EXEC", "Execução"), ("ERROR", "Erros")]
+        
+        for key, label in filters:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setAutoExclusive(True)
+            if key == "ALL": btn.setChecked(True)
+            btn.clicked.connect(lambda _, k=key: self._filter_terminal(k))
+            filter_bar.addWidget(btn)
+            self.filter_buttons[key] = btn
+            
+        filter_bar.addStretch(1)
+        
+        self.clear_terminal_button = QPushButton("Limpar")
         self.clear_terminal_button.setObjectName("SecondaryButton")
         self.clear_terminal_button.clicked.connect(self._clear_terminal_output)
-        header.addWidget(self.clear_terminal_button)
-
-        self.close_other_instances_button = QPushButton("Fechar Instâncias")
-        self.close_other_instances_button.setObjectName("SecondaryButton")
-        self.close_other_instances_button.clicked.connect(self._close_other_instances)
-        header.addWidget(self.close_other_instances_button)
-        terminal_layout.addLayout(header)
-
-        hint = QLabel("Espelho bruto do stdout e stderr do runtime e dos comandos auxiliares.")
-        hint.setObjectName("HeroHint")
-        _configure_dynamic_label(hint)
-        terminal_layout.addWidget(hint)
+        filter_bar.addWidget(self.clear_terminal_button)
+        
+        terminal_layout.addLayout(filter_bar)
 
         self.terminal_output = QPlainTextEdit()
         self.terminal_output.setObjectName("technicalLog")
         self.terminal_output.setReadOnly(True)
-        self.terminal_output.setLineWrapMode(QPlainTextEdit.WidgetWidth)
-        self.terminal_output.setPlaceholderText("Aguardando saida dos processos...")
-        self.terminal_output.document().setMaximumBlockCount(6000)
+        self.terminal_output.document().setMaximumBlockCount(2000)
         terminal_layout.addWidget(self.terminal_output, 1)
 
         layout.addWidget(terminal_card, 1)
@@ -1765,7 +1765,10 @@ class TraderBotLauncher(QMainWindow):
         payload = bytes(process.readAllStandardError()).decode("utf-8", errors="ignore")
         if not payload:
             return
-        self._append_terminal_output(payload)
+        
+        # Enviamos para o terminal com a categoria ERROR (fica vermelho)
+        self._append_terminal_output(payload, category="ERROR")
+        
         if process is self.run_process:
             self._run_stderr_buffer += payload
             return
@@ -2081,12 +2084,12 @@ class TraderBotLauncher(QMainWindow):
             self._new_event(
                 source="launcher",
                 event_type="generic",
-                raw_line="Configuracoes salvas.",
+                raw_line="Configurações salvas.",
                 message=(
-                    f"Configuracoes salvas. Risco {self.cfg.environment.max_risk_per_trade * 100.0:.2f}%, "
-                    f"filtro HOLD {self.cfg.environment.action_hold_threshold:.2f}, "
-                    f"regime dist>={self.cfg.environment.regime_min_abs_dist_ema_240:.3f}, "
-                    f"regime vol>={self.cfg.environment.regime_min_vol_regime_z:.2f}, "
+                    f"Configurações salvas. Risco {self.cfg.environment.max_risk_per_trade * 100.0:.2f}% | "
+                    f"filtro HOLD {self.cfg.environment.action_hold_threshold:.2f} | "
+                    f"regime dist {self.cfg.environment.regime_min_abs_dist_ema_240:.3f} | "
+                    f"regime vol {self.cfg.environment.regime_min_vol_regime_z:.2f} | "
                     f"auto check {int(self.cfg.launcher.auto_check_interval_seconds)}s"
                 ),
                 event_code="system.settings_saved",
@@ -2458,19 +2461,54 @@ class TraderBotLauncher(QMainWindow):
         if hasattr(self, "terminal_output"):
             self.terminal_output.clear()
 
-    def _append_terminal_output(self, text: str) -> None:
-        if not text or not hasattr(self, "terminal_output"):
-            return
+    def _append_terminal_output(self, text: str, category: str = "SYSTEM") -> None:
+        if not text: return
+        
+        # Define a cor baseada na categoria
+        colors = {"SYSTEM": "#888888", "IA": "#3498db", "EXEC": "#2ecc71", "ERROR": "#e74c3c"}
+        color = colors.get(category, "#ffffff")
+        
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted_line = f"[{timestamp}] [{category}] {text.strip()}"
+        
+        scrollbar = self.terminal_output.verticalScrollBar()
+        at_bottom = scrollbar.value() >= (scrollbar.maximum() - 10)
+        
+        self.terminal_output.appendHtml(f'<span style="color: {color};">{formatted_line}</span>')
+        
+        if at_bottom:
+            self.terminal_output.moveCursor(QTextCursor.End)
+        
+        # Guarda no histórico
+        self.terminal_logs.append({"category": category, "text": formatted_line, "color": color})
+        if len(self.terminal_logs) > 2000: self.terminal_logs.pop(0)
+
+        # Só exibe se passar no filtro atual
+        if self.current_terminal_filter == "ALL" or self.current_terminal_filter == category:
+            self.terminal_output.appendHtml(f'<span style="color: {color};">{formatted_line}</span>')
+            self.terminal_output.moveCursor(QTextCursor.End)
+
+    def _filter_terminal(self, category: str) -> None:
+        self.current_terminal_filter = category
+        self.terminal_output.clear()
+        for log in self.terminal_logs:
+            if category == "ALL" or log["category"] == category:
+                self.terminal_output.appendHtml(f'<span style="color: {log["color"]};">{log["text"]}</span>')
         self.terminal_output.moveCursor(QTextCursor.End)
-        self.terminal_output.insertPlainText(text)
-        self.terminal_output.moveCursor(QTextCursor.End)
-        self.terminal_output.ensureCursorVisible()
+
+    def _clear_terminal_output(self) -> None:
+        self.terminal_logs = []
+        self.terminal_output.clear()
 
     def _handle_run_output(self) -> None:
         def _consume() -> None:
             while self.run_process.canReadLine():
                 raw_payload = bytes(self.run_process.readLine()).decode("utf-8", errors="ignore")
-                self._append_terminal_output(raw_payload)
+                
+                # Inteligência de filtro: Detecta se a linha fala de votos/bias
+                category = "IA" if any(x in raw_payload for x in ["Votos", "Bias", "Model", "Placar"]) else "EXEC"
+                
+                self._append_terminal_output(raw_payload, category=category)
                 self._parse_line(raw_payload.rstrip("\r\n"), source="run")
 
         self._guard_launcher_action("leitura do stdout do runtime", _consume)
@@ -2482,7 +2520,9 @@ class TraderBotLauncher(QMainWindow):
         def _consume() -> None:
             while self.task_process.canReadLine():
                 raw_payload = bytes(self.task_process.readLine()).decode("utf-8", errors="ignore")
-                self._append_terminal_output(raw_payload)
+                
+                # Tarefas auxiliares entram como SYSTEM por padrão
+                self._append_terminal_output(raw_payload, category="SYSTEM")
                 self._parse_line(raw_payload.rstrip("\r\n"), source="task")
 
         self._guard_launcher_action("leitura do stdout do processo auxiliar", _consume)
@@ -2514,8 +2554,8 @@ class TraderBotLauncher(QMainWindow):
                 event = self._new_event(
                     source="launcher",
                     event_type="generic",
-                    raw_line=f"Bot Desligado).",
-                    message=f"Bot Desligado).",
+                    raw_line=f"Bot Desligado.",
+                    message=f"Bot Desligado.",
                     severity="info" if exit_code else "info",
                     event_code="system.runtime_finished",
                 )
@@ -2625,9 +2665,9 @@ class TraderBotLauncher(QMainWindow):
             plain = self._strip_prefix(line)
             if "Iniciando pipeline com comando: run" in plain:
                 self.state.state_label = "RODANDO"
-                self.state.state_message = "Aguardando proximo ciclo..."
+                self.state.state_message = "Buscando entrada..."
                 self.state.state_style = "wait"
-                self.state.last_decision = "Aguardando proximo ciclo..."
+                self.state.last_decision = "Buscando entrada..."
                 self._update_controls()
                 self._refresh_dashboard()
 
@@ -3320,9 +3360,10 @@ class TraderBotLauncher(QMainWindow):
             else:
                 self.state.losses_today += 1
         elif blocked_reason:
-            summary_text = self._human_block_label(str(blocked_reason))
+            reason_human = self._human_block_label(str(blocked_reason))
+            summary_text = f"Mercado Desfavorável: {reason_human}"
             self.state.blocked_today_label = self._increment_counter_label(self.state.blocked_today_label)
-            self.state.last_skip_reason_label = summary_text
+            self.state.last_skip_reason_label = reason_human
         elif silenced_cycle_issue and payload.get("position_is_open"):
             summary_text = f"Posicao {position_label} em andamento."
         else:
