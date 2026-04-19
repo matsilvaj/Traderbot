@@ -267,6 +267,12 @@ class DashboardState:
     feature_snapshot: dict[str, Any] = field(default_factory=dict)
     decision_snapshot: dict[str, Any] = field(default_factory=dict)
     filter_snapshot: dict[str, Any] = field(default_factory=dict)
+    pnl_session_label: str = "$0.00"
+    pnl_today: float = 0.0
+    rsi_label: str = "--"
+    atr_label: str = "--"
+    vol_z_label: str = "--"
+    dist_ema_960_label: str = "--"
 
 
 @dataclass
@@ -1192,84 +1198,74 @@ class TraderBotLauncher(QMainWindow):
         self.details_scroll.setWidgetResizable(True)
         self.details_scroll.setFrameShape(QFrame.NoFrame)
         self.details_scroll.setObjectName("DetailsScroll")
-        self.details_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        self.details_scroll.setStyleSheet("background-color: transparent;")
+        self.details_scroll.viewport().setStyleSheet("background-color: transparent;")
 
         details_host = QWidget()
-        details_host.setObjectName("DetailsHost")
-        details_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        details_host.setStyleSheet("background-color: transparent;")
         content_layout = QVBoxLayout(details_host)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(18)
+        content_layout.setSpacing(20)
 
+        # --- BLOCO 1: GRID DE PERFORMANCE (4 TILES) ---
         self.details_metrics_grid = QGridLayout()
-        self.details_metrics_grid.setContentsMargins(0, 0, 0, 0)
-        self.details_metrics_grid.setHorizontalSpacing(14)
-        self.details_metrics_grid.setVerticalSpacing(14)
-
-        self.heartbeat_tile = MetricTile("Último check válido", compact=True, min_height=92)
-        self.operations_today_tile = MetricTile("Operações hoje", compact=True, min_height=92)
-        self.blocked_today_tile = MetricTile("Bloqueios hoje", compact=True, min_height=92)
+        self.heartbeat_tile = MetricTile("Último check", compact=True, min_height=92)
+        self.operations_today_tile = MetricTile("Operações", compact=True, min_height=92)
+        self.blocked_today_tile = MetricTile("Bloqueios", compact=True, min_height=92)
+        self.pnl_session_tile = MetricTile("PnL Sessão", compact=True, min_height=92)
+        
         self.details_metric_tiles = [
-            self.heartbeat_tile,
-            self.operations_today_tile,
-            self.blocked_today_tile,
+            self.heartbeat_tile, self.operations_today_tile, 
+            self.blocked_today_tile, self.pnl_session_tile
         ]
         content_layout.addLayout(self.details_metrics_grid)
 
-        decision_card = QFrame()
-        decision_card.setObjectName("PositionCard")
-        decision_layout = QVBoxLayout(decision_card)
-        decision_layout.setContentsMargins(18, 16, 18, 16)
-        decision_layout.setSpacing(8)
+        # --- BLOCO 2: RAIO-X TÉCNICO (GRID 2x2) ---
+        tech_card = QFrame()
+        tech_card.setObjectName("PositionCard")
+        tech_layout = QVBoxLayout(tech_card)
+        tech_layout = QVBoxLayout(tech_card)
+        tech_title = QLabel("Ambiente Técnico (H1)")
+        tech_title.setObjectName("fieldLabel")
+        tech_layout.addWidget(tech_title)
 
-        decision_title = QLabel("Última Decisão do Bot")
-        decision_title.setObjectName("fieldLabel")
-        decision_layout.addWidget(decision_title)
+        self.tech_grid = QGridLayout()
+        self.rsi_field = DetailFieldCard("RSI (14)", min_height=100)
+        self.atr_field = DetailFieldCard("ATR %", min_height=100)
+        self.vol_z_field = DetailFieldCard("Vol. Z-Score", min_height=100)
+        self.ema_960_field = DetailFieldCard("Dist. EMA 960", min_height=100)
+        
+        self.tech_grid.addWidget(self.rsi_field, 0, 0)
+        self.tech_grid.addWidget(self.atr_field, 0, 1)
+        self.tech_grid.addWidget(self.vol_z_field, 1, 0)
+        self.tech_grid.addWidget(self.ema_960_field, 1, 1)
+        tech_layout.addLayout(self.tech_grid)
+        content_layout.addWidget(tech_card)
 
-        self.details_final_action = QLabel("Aguardando próximo ciclo...")
-        self.details_final_action.setObjectName("metricValue")
-        self.details_final_action.setProperty("sizeVariant", "body")
-        _configure_dynamic_label(self.details_final_action)
-        decision_layout.addWidget(self.details_final_action)
-
-        self.details_decision_reason = QLabel("--")
-        self.details_decision_reason.setObjectName("HeroHint")
-        _configure_dynamic_label(self.details_decision_reason)
-        decision_layout.addWidget(self.details_decision_reason)
-
-        content_layout.addWidget(decision_card)
-
-        self.details_filters_card = DetailFieldCard("Checks dos filtros", min_height=176, rich_summary=True)
-        self.details_filters_card.set_summary("Aguardando proximo ciclo...")
-        self.details_filters_card.set_note("Os filtros aparecerão aqui.")
+        # --- BLOCO 3: LÓGICA DE EXECUÇÃO (FILTROS) ---
+        self.details_filters_card = DetailFieldCard("Análise de Decisão & Filtros", min_height=200, rich_summary=True)
         content_layout.addWidget(self.details_filters_card)
 
+        # --- BLOCO 4: CONSENSO NEURAL (VOTOS EM COLUNAS) ---
         votes_card = QFrame()
         votes_card.setObjectName("PositionCard")
         votes_layout = QVBoxLayout(votes_card)
-        votes_layout.setContentsMargins(18, 16, 18, 16)
-        votes_layout.setSpacing(12)
-
-        votes_header = QHBoxLayout()
-        votes_title = QLabel("Votos Individuais dos Modelos")
-        votes_title.setObjectName("fieldLabel")
-        votes_header.addWidget(votes_title)
-
+        
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Consenso dos Modelos"), 0, Qt.AlignLeft)
         self.details_vote_timestamp = QLabel("--:--:--")
-        self.details_vote_timestamp.setObjectName("subtleText")
-        votes_header.addWidget(self.details_vote_timestamp, 0, Qt.AlignRight)
-        votes_layout.addLayout(votes_header)
+        header.addWidget(self.details_vote_timestamp, 0, Qt.AlignRight)
+        votes_layout.addLayout(header)
 
-        self.details_votes_container = QVBoxLayout()
-        self.details_votes_container.setSpacing(8)
-        votes_layout.addLayout(self.details_votes_container)
-
+        self.details_votes_grid = QGridLayout() # Mudamos para Grid
+        self.details_votes_grid.setSpacing(12)
+        votes_layout.addLayout(self.details_votes_grid)
         content_layout.addWidget(votes_card)
-        content_layout.addStretch(1)
 
+        content_layout.addStretch(1)
         self.details_scroll.setWidget(details_host)
         layout.addWidget(self.details_scroll, 1)
-
         return tab
 
     def _build_events_tab(self) -> QWidget:
@@ -2518,9 +2514,9 @@ class TraderBotLauncher(QMainWindow):
                 event = self._new_event(
                     source="launcher",
                     event_type="generic",
-                    raw_line=f"Runtime finalizado (exit={exit_code}).",
-                    message=f"Runtime finalizado (exit={exit_code}).",
-                    severity="warning" if exit_code else "info",
+                    raw_line=f"Bot Desligado).",
+                    message=f"Bot Desligado).",
+                    severity="info" if exit_code else "info",
                     event_code="system.runtime_finished",
                 )
                 self._push_event(event)
@@ -2629,9 +2625,9 @@ class TraderBotLauncher(QMainWindow):
             plain = self._strip_prefix(line)
             if "Iniciando pipeline com comando: run" in plain:
                 self.state.state_label = "RODANDO"
-                self.state.state_message = "Aguardando proximo ciclo."
+                self.state.state_message = "Aguardando proximo ciclo..."
                 self.state.state_style = "wait"
-                self.state.last_decision = "Aguardando proximo ciclo."
+                self.state.last_decision = "Aguardando proximo ciclo..."
                 self._update_controls()
                 self._refresh_dashboard()
 
@@ -3187,6 +3183,43 @@ class TraderBotLauncher(QMainWindow):
         regime_valid = filter_snapshot.get("regime_valid_for_entry", False)
         dist_ema = _safe_float(feature_snapshot.get("dist_ema_240"))
         
+        self.state.rsi_label = _optional_number(feature_snapshot.get("rsi_14"), digits=1)
+        self.state.atr_label = _pct(feature_snapshot.get("atr_pct"))
+        self.state.vol_z_label = _optional_number(feature_snapshot.get("volume_zscore_20"), signed=True)
+        self.state.dist_ema_960_label = _pct(feature_snapshot.get("dist_ema_960"))
+        # -- 2. Viés da IA --
+        final_action_val = float(decision_snapshot.get("final_action", 0.0) or 0.0)
+        bias_pct = abs(final_action_val) * 100.0
+        hold_threshold = float(self.cfg.environment.action_hold_threshold)
+        
+        if final_action_val >= hold_threshold:
+            self.state.ai_bias_label = f"Compra ({bias_pct:.1f}%)"
+        elif final_action_val <= -hold_threshold:
+            self.state.ai_bias_label = f"Venda ({bias_pct:.1f}%)"
+        else:
+            self.state.ai_bias_label = f"Indeciso ({bias_pct:.1f}%)"
+
+        # -- 3. Placar dos Modelos (Eleição) --
+        votes_data = decision_snapshot.get("model_votes") or decision_snapshot.get("raw_actions") or {}
+        if isinstance(votes_data, dict) and votes_data:
+            vals = list(votes_data.values())
+            buys = sum(1 for v in vals if _safe_float(v) is not None and _safe_float(v) >= hold_threshold)
+            sells = sum(1 for v in vals if _safe_float(v) is not None and _safe_float(v) <= -hold_threshold)
+            holds = len(vals) - buys - sells
+            
+            if buys == len(vals) and buys > 0:
+                self.state.ensemble_score_label = f"Unânime (Compra {buys}x0)"
+            elif sells == len(vals) and sells > 0:
+                self.state.ensemble_score_label = f"Unânime (Venda {sells}x0)"
+            elif holds == len(vals) and holds > 0:
+                self.state.ensemble_score_label = "Todos em HOLD"
+            elif buys > sells:
+                self.state.ensemble_score_label = f"Compra ({buys}x{sells})"
+            elif sells > buys:
+                self.state.ensemble_score_label = f"Venda ({sells}x{buys})"
+            else:
+                self.state.ensemble_score_label = f"Dividido ({buys}C-{sells}V)"
+        
         if not regime_valid:
             self.state.market_status_label = "Lateral"
         elif dist_ema is not None and dist_ema > 0:
@@ -3272,6 +3305,9 @@ class TraderBotLauncher(QMainWindow):
             self.state.operations_today_label = self._increment_counter_label(self.state.operations_today_label)
             self.state.last_trade_reason_label = summary_text
         elif payload.get("closed_trade"):
+            trade_pnl = float(payload.get("position_unrealized_pnl", 0.0) or 0.0)
+            self.state.pnl_today += trade_pnl
+            self.state.pnl_session_label = _currency(self.state.pnl_today)
             summary_text = "Posição fechada."
             self.state.last_trade_reason_label = summary_text
             exit_reason = str(payload.get("exit_reason") or "").lower()
@@ -3391,106 +3427,80 @@ class TraderBotLauncher(QMainWindow):
 
         # --- ATUALIZAÇÃO DA ABA DE DETALHES ---
 
+        # 1. Atualização dos Tiles de Topo
         self.heartbeat_tile.update_tile(_display_value(self.state.last_valid_check_label, "--"), tone="default")
         self.operations_today_tile.update_tile(_display_value(self.state.operations_today_label, "0"), tone="default")
         self.blocked_today_tile.update_tile(_display_value(self.state.blocked_today_label, "0"), tone="default")
+        
+        pnl_tone = "success" if self.state.pnl_today >= 0 else "error"
+        self.pnl_session_tile.update_tile(self.state.pnl_session_label, tone=pnl_tone)
 
+        # 2. Atualização do Raio-X Técnico
+        self.rsi_field.set_summary(self.state.rsi_label)
+        self.atr_field.set_summary(self.state.atr_label)
+        self.vol_z_field.set_summary(self.state.vol_z_label)
+        self.ema_960_field.set_summary(self.state.dist_ema_960_label)
+
+        # 3. Análise de Filtros e Decisão
         dec_snap = self.state.decision_snapshot if isinstance(self.state.decision_snapshot, dict) else {}
-        if dec_snap:
-            final_action = dec_snap.get("final_action", 0.0)
-            direction = str(dec_snap.get("vote_bucket", "--")).upper()
-            reason = str(dec_snap.get("reason", self.state.last_decision))
-
-            self.details_final_action.setText(
-                f"Consenso: {direction} | Força do sinal: {_strength(final_action)}"
-            )
-            self.details_decision_reason.setText(reason)
-        else:
-            self.details_final_action.setText("Carregando...")
-            self.details_decision_reason.setText("Nenhum dado recebido ainda.")
-
-        _fit_label_height(self.details_final_action)
-        _fit_label_height(self.details_decision_reason)
-
         filter_summary, filter_note = self._build_filter_details_summary()
         self.details_filters_card.set_summary(filter_summary)
         self.details_filters_card.set_note(filter_note)
 
-        while self.details_votes_container.count():
-            item = self.details_votes_container.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-            elif item.layout():
-                self._detach_layout_items(item.layout())
+        # 4. Reconstrução do Grid de Votos (2 Colunas)
+        # Limpa o grid atual antes de reconstruir
+        while self.details_votes_grid.count():
+            item = self.details_votes_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
+        # Prepara os itens de voto
         votes_data = dec_snap.get("model_votes") or dec_snap.get("raw_actions") or {}
-        fallback_votes = dec_snap.get("votes") or {}
-        if (
-            not votes_data
-            and isinstance(fallback_votes, dict)
-            and any(str(key).lower() not in {"buy", "hold", "sell"} for key in fallback_votes)
-        ):
-            votes_data = fallback_votes
-
-        if isinstance(votes_data, str):
-            try:
-                votes_data = json.loads(votes_data)
-            except Exception:
-                votes_data = {}
-
-        vote_items: list[tuple[str, Any]] = []
+        vote_items = []
         if isinstance(votes_data, dict) and votes_data:
-            vote_items = [(str(model_name), vote_value) for model_name, vote_value in votes_data.items()]
-        elif isinstance(votes_data, list) and votes_data:
-            configured_model_names = self.cfg.execution.selected_model_names or self.cfg.execution.ensemble_model_names
-            vote_items = [
-                (
-                    str(configured_model_names[index]) if index < len(configured_model_names) else f"model_{index + 1}",
-                    vote_value,
-                )
-                for index, vote_value in enumerate(votes_data)
-            ]
+            vote_items = [(str(m), v) for m, v in votes_data.items()]
+        
+        if vote_items:
+            self.details_vote_timestamp.setText(datetime.now().strftime("%H:%M:%S"))
+            for i, (model_name, vote_value) in enumerate(vote_items):
+                row, col = divmod(i, 2) # Calcula posição no grid (2 colunas)
+                
+                container = QFrame()
+                container.setObjectName("VoteItem") # Opcional: estilizar no theme.qss
+                h_layout = QHBoxLayout(container)
+                h_layout.setContentsMargins(5, 2, 5, 2)
 
-        if dec_snap and vote_items:
-            for model_name, vote_value in vote_items:
-                row = QHBoxLayout()
-
-                clean_name = str(model_name).replace("_", " ").upper()
-                m_label = QLabel(clean_name)
+                m_label = QLabel(str(model_name).replace("_", " ").upper())
                 m_label.setObjectName("subtleText")
-
+                
                 val_float = _safe_float(vote_value)
+                hold_threshold = float(self.cfg.environment.action_hold_threshold)
+                
                 if val_float is not None:
-                    tamanho_voto = f"{val_float * 100.0:+.1f}"
-                    # Vai buscar o valor salvo nas definições (ex: 0.60)
-                    hold_threshold = float(self.cfg.environment.action_hold_threshold)
-
+                    strength = f"{val_float * 100.0:+.1f}"
                     if val_float >= hold_threshold:
-                        v_text = f"LONG({tamanho_voto})"
-                        tone = "success"
+                        v_text, tone = f"LONG {strength}", "success"
                     elif val_float <= -hold_threshold:
-                        v_text = f"SHORT({tamanho_voto})"
-                        tone = "error"
+                        v_text, tone = f"SHORT {strength}", "error"
                     else:
-                        v_text = f"HOLD({tamanho_voto})"
-                        tone = "muted"
+                        v_text, tone = f"HOLD {strength}", "muted"
                 else:
-                    v_text = str(vote_value)
-                    tone = "default"
+                    v_text, tone = "--", "default"
 
                 v_label = QLabel(v_text)
                 v_label.setObjectName("metricValue")
                 v_label.setProperty("sizeVariant", "body")
                 _set_widget_property(v_label, "tone", tone)
 
-                row.addWidget(m_label)
-                row.addWidget(v_label, 0, Qt.AlignRight)
-                self.details_votes_container.addLayout(row)
+                h_layout.addWidget(m_label)
+                h_layout.addStretch(1)
+                h_layout.addWidget(v_label)
+                
+                self.details_votes_grid.addWidget(container, row, col)
         else:
-            lbl = QLabel("Aguardando registro numérico dos modelos no próximo ciclo...")
+            lbl = QLabel("Aguardando registro dos modelos...")
             lbl.setObjectName("HeroHint")
-            self.details_votes_container.addWidget(lbl)
+            self.details_votes_grid.addWidget(lbl, 0, 0)
 
     def _update_navigation_state(self) -> None:
         labels = {
