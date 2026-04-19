@@ -1,4 +1,6 @@
 from __future__ import annotations
+from traderbot.utils.logger import setup_logger
+from traderbot.utils.telegram_notifier import TelegramNotifier
 
 import json
 import os
@@ -241,7 +243,13 @@ class DashboardState:
     connection_label: str = "offline"
     execution_mode_label: str = "exchange"
     operations_today_label: str = "0"
+    wins_today: int = 0 
+    losses_today: int = 0
     blocked_today_label: str = "0"
+    market_status_label: str = "Aguardando..."
+    drawdown_label: str = "--"
+    ai_bias_label: str = "--"
+    ensemble_score_label: str = "--"
     humanized_execution_summary: str = ""
     humanized_simple_summary: str = ""
     last_cycle_fingerprint: str = ""
@@ -521,7 +529,7 @@ class NotificationItemWidget(QFrame):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
 
         top = QHBoxLayout()
@@ -535,35 +543,44 @@ class NotificationItemWidget(QFrame):
         self.severity_badge.setObjectName("badge")
         top.addWidget(self.severity_badge, 0, Qt.AlignLeft)
 
+        # Espaçamento flexível para empurrar o tempo para a direita
+        top.addStretch(1)
+
         self.time_label = QLabel("--:--:--")
         self.time_label.setObjectName("metaLabel")
-        top.addWidget(self.time_label)
+        top.addWidget(self.time_label, 0, Qt.AlignRight)
+
+        self.count_label = QLabel("")
+        self.count_label.setObjectName("metaLabel")
+        self.count_label.hide()
+        top.addWidget(self.count_label, 0, Qt.AlignRight)
 
         layout.addLayout(top)
 
         self.message_label = QLabel("")
         self.message_label.setObjectName("notificationMessage")
         _configure_dynamic_label(self.message_label)
-        self.message_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self.message_label)
         self.setToolTip("Ver log tecnico")
 
     def apply_summary(self, summary: HumanizedEvent) -> None:
         self.summary = summary
-        self.dot_label.setText("•")
+        self.dot_label.setText("●")
         self.severity_badge.setText(summary.severity.upper())
         self.message_label.setText(summary.message_human)
-        _fit_label_height(self.message_label)
-        widget_hint_height = self.sizeHint().height()
-        if widget_hint_height > 0:
-            self.setMinimumHeight(widget_hint_height)
-        self.message_label.updateGeometry()
-        self.updateGeometry()
         self.time_label.setText(summary.timestamp.strftime("%H:%M:%S"))
+        
         _set_widget_property(self, "severity", summary.severity)
         _set_widget_property(self.severity_badge, "severity", summary.severity)
         _set_widget_property(self.dot_label, "severity", summary.severity)
+        
         self._refresh_count()
+        
+        # Ajusta a altura da mensagem para caber o texto
+        _fit_label_height(self.message_label)
+        
+        # Força o card a recalcular seu tamanho total baseado no conteúdo novo
+        self.updateGeometry()
 
     def bump(self, summary: HumanizedEvent) -> None:
         self.count += 1
@@ -575,12 +592,12 @@ class NotificationItemWidget(QFrame):
             return
         self.count_label.setText(f"x{self.count}")
         self.count_label.show()
+        self.count_label.adjustSize()
 
-    def mousePressEvent(self, event) -> None:  # noqa: N802
+    def mousePressEvent(self, event) -> None:
         super().mousePressEvent(event)
         dialog = EventDetailsDialog(self.summary, parent=self.window())
         dialog.exec()
-
 
 class SettingsDialog(QDialog):
     RESTART_REQUESTED = 1001
@@ -849,6 +866,7 @@ class TraderBotLauncher(QMainWindow):
         self._run_stderr_buffer = ""
         self._task_stderr_buffer = ""
         self._last_cycle_identity: str | None = None
+        self.notifier = TelegramNotifier(logger=setup_logger("launcher-notifier", self.cfg.paths.logs_dir))
         
 
         self.run_process = self._build_process(
@@ -1082,23 +1100,24 @@ class TraderBotLauncher(QMainWindow):
         self.dashboard_metrics_grid.setHorizontalSpacing(12)
         self.dashboard_metrics_grid.setVerticalSpacing(12)
 
-        self.signal_tile = MetricTile("Sinal", compact=True, min_height=118)
-        self.reason_tile = MetricTile("Motivo", wrap_value=True, min_height=144)
-        self.price_tile = MetricTile("Preço de referência", compact=True, min_height=118)
-        self.risk_tile = MetricTile("Risco efetivo", compact=True, min_height=118)
-        self.position_tile = MetricTile("Posição atual", compact=True, min_height=118)
-        self.pnl_tile = MetricTile("PnL aberto", compact=True, min_height=118)
+        self.market_status_tile = MetricTile("Status do Mercado", compact=True, min_height=118)
+        self.drawdown_tile = MetricTile("Drawdown Atual", compact=True, min_height=118)
+        self.ai_bias_tile = MetricTile("Viés da IA", compact=True, min_height=118)
+        self.ensemble_score_tile = MetricTile("Placar dos Modelos", compact=True, min_height=118)
+        self.operations_tile = MetricTile("Operações hoje", compact=True, min_height=118)
+        self.winrate_tile = MetricTile("Win Rate (Sessão)", compact=True, min_height=118)
+
         self.dashboard_metric_tiles = [
-            self.signal_tile,
-            self.reason_tile,
-            self.price_tile,
-            self.risk_tile,
-            self.position_tile,
-            self.pnl_tile,
+            self.market_status_tile,
+            self.drawdown_tile,
+            self.ai_bias_tile,
+            self.ensemble_score_tile,
+            self.operations_tile,
+            self.winrate_tile,
         ]
         for tile in self.dashboard_metric_tiles:
             tile.setMinimumHeight(104)
-        self.reason_tile.setMinimumHeight(122)
+        
         layout.addLayout(self.dashboard_metrics_grid)
 
         position = QFrame()
@@ -1894,30 +1913,24 @@ class TraderBotLauncher(QMainWindow):
         self.health_state.runtime_state_ok = False
 
         self._refresh_connectivity_health(emit_event=not stop_requested)
+        
+        if stop_requested and hasattr(self, 'notifier'):
+            self.notifier.notify_stopped()
 
         if exit_code != 0 and not stop_requested:
-            summary = "Bot parado após falha do runtime. Revise o erro para retomar a operação."
+            summary = "Bot parado após falha do runtime. Revise o erro."
             style = "error"
         else:
-            summary = "Bot parado | Inicie para voltar a operar."
+            summary = "Bot Parado"
             style = "blocked"
 
+        # Atualiza o estado para a interface
         self.state.state_label = "PARADO"
         self.state.state_message = summary
         self.state.state_style = style
-        self.state.last_decision = summary
         self.state.humanized_simple_summary = summary
-        self.state.humanized_execution_summary = summary
-        self.state.last_cycle_fingerprint = ""
-        self._last_cycle_identity = None
-
-        if self.state.position_label in {"LONG", "SHORT"}:
-            self.state.position_status = self._position_status_text(
-                self.state.position_label
-            )
-        else:
-            self.state.position_status = "Bot Parado"
-
+        self.state.last_decision = summary
+        
         self._refresh_dashboard()
         self._update_controls()
 
@@ -2631,6 +2644,8 @@ class TraderBotLauncher(QMainWindow):
         self.stats_day = today
         self.state.operations_today_label = "0"
         self.state.blocked_today_label = "0"
+        self.state.wins_today = 0
+        self.state.losses_today = 0
         self.state.last_trade_reason_label = "Nenhuma operação hoje."
         self.state.last_skip_reason_label = "Nenhum bloqueio recente."
 
@@ -2642,84 +2657,61 @@ class TraderBotLauncher(QMainWindow):
 
     def _apply_status_payload(self, payload: dict[str, Any], *, source: str) -> None:
         check_at = datetime.now()
-        connected = bool(payload.get("connected"))
-        can_trade = bool(payload.get("can_trade"))
+        
+        # 1. Captura os dados de saúde e conta (suporta tanto o Check inicial quanto o Bot rodando)
+        health = payload.get("health_summary", {})
+        account = payload.get("account_summary", {})
+        
+        connected = bool(health.get("connected", payload.get("connected", False)))
+        can_trade = bool(health.get("can_trade", payload.get("can_trade", False)))
+        
         health_ok = connected and can_trade
         self.health_state.last_healthcheck_at = check_at
         self.health_state.last_check_execution_ok = True
         self.health_state.connection_ok = health_ok
+        
         if health_ok:
             self.health_state.last_successful_healthcheck_at = check_at
+            
         self.state.online = health_ok
         self.state.can_trade = can_trade
         self.state.network_label = str(payload.get("network", self._current_mode().label)).upper()
-        self.state.balance_label = _currency(payload.get("available_to_trade", 0.0))
+        
+        # 2. Atualiza Saldo e Drawdown (Lógica unificada)
+        balance_val = account.get("available_to_trade", payload.get("available_to_trade", 0.0))
+        dd_val = account.get("drawdown_pct", payload.get("drawdown_pct", 0.0))
+        
+        self.state.balance_label = _currency(balance_val)
+        self.state.drawdown_label = _pct(dd_val)
         self.state.risk_label = _pct(self.cfg.environment.max_risk_per_trade)
         self.state.last_update_label = check_at.strftime("%H:%M:%S")
         self.state.last_raw_detail = json.dumps(payload, ensure_ascii=False, indent=2)
-        runtime_running = self.run_process.state() != QProcess.NotRunning
-        native_tp_sl = self._native_tp_sl_payload(payload)
-        self.state.native_tp_sl_status = native_tp_sl
-        position_label = str(payload.get("position_label") or "").upper()
-        if not position_label:
-            snapshot = payload.get("position_snapshot") if isinstance(payload.get("position_snapshot"), dict) else {}
-            position_label = self._position_label_from_side(snapshot.get("side", payload.get("position_side")))
-        position_is_open = bool(payload.get("position_is_open")) or position_label in {"LONG", "SHORT"}
 
-        if position_is_open:
-            self.state.position_label = position_label
-            self.state.position_size_label = _currency(
-                payload.get("position_notional_value", payload.get("position_size", 0.0))
-            )
-            self.state.entry_label = _currency(payload.get("position_avg_entry_price", 0.0))
-            self.state.take_profit_label = _currency(payload.get("take_profit_price", 0.0))
-            self.state.stop_loss_label = _currency(payload.get("stop_loss_price", 0.0))
-            pnl_value = float(payload.get("position_unrealized_pnl", 0.0) or 0.0)
-            self.state.pnl_label = _currency(pnl_value)
-            self.state.pnl_style = "success" if pnl_value >= 0 else "error"
-            self.state.position_status = self._position_status_text(
-                self.state.position_label
-            )
-        else:
-            self.state.position_label = "FLAT"
-            self.state.position_size_label = "--"
-            self.state.entry_label = "--"
-            self.state.take_profit_label = "--"
-            self.state.stop_loss_label = "--"
-            self.state.native_tp_sl_status = {}
-            self.state.pnl_label = "--"
-            self.state.pnl_style = "muted"
+        # 3. Atualiza o Status Visual para PARADO se o bot não estiver em execução
+        runtime_running = self.run_process.state() != QProcess.NotRunning
         if connected and can_trade and not runtime_running:
             self.state.state_label = "PARADO"
             self.state.state_message = "Bot Parado"
             self.state.state_style = "blocked"
-            if self.state.position_label in {"LONG", "SHORT"}:
-                self.state.position_status = self._position_status_text(
-                    self.state.position_label
-            )
+            self.state.humanized_simple_summary = "Bot Parado"
 
-        if self._has_complete_initial_snapshot():
-            self._awaiting_initial_snapshot = False
+        # 4. ESSENCIAL: Força o Dashboard a mostrar os novos dados na tela
+        self._refresh_dashboard()
 
-        signature = (
-            payload.get("connected"),
-            payload.get("can_trade"),
-            round(float(payload.get("available_to_trade", 0.0) or 0.0), 2),
-            payload.get("network"),
-        )
-        should_notify = not bool(self._active_task_context.get("silent")) or signature != self.last_connection_signature
+        # 5. Notificação de evento (mantém seu log de eventos limpo)
+        signature = (connected, can_trade, round(float(balance_val), 2))
+        should_notify = signature != self.last_connection_signature
         self.last_connection_signature = signature
-        if should_notify:
-            # ADICIONE A MENSAGEM CLARA AQUI
-            msg = "Conectado com a Hyperliquid." if (connected and can_trade) else ("Conectado, mas sem permissão de trade." if connected else "Falha de conexão com a Hyperliquid.")
-            
+        
+        if should_notify and not bool(self._active_task_context.get("silent")):
+            msg = "Conectado com a Hyperliquid." if health_ok else "Falha de conexão ou permissão."
             event = self._new_event(
                 source=source,
                 event_type="status",
-                raw_line=json.dumps(payload, ensure_ascii=False),
-                message=msg,  # PASSE A MENSAGEM AQUI
+                raw_line=json.dumps(payload),
+                message=msg,
                 payload=payload,
-                severity="info" if connected and can_trade else "warning" if connected else "error",
+                severity="info" if health_ok else "error",
                 event_code="healthcheck.status",
             )
             self._push_event(event)
@@ -2732,7 +2724,7 @@ class TraderBotLauncher(QMainWindow):
             source=source,
             event_type="smoke",
             raw_line=json.dumps(payload, ensure_ascii=False),
-            message=msg, # PASSE A MENSAGEM AQUI
+            message=msg,
             payload=payload,
             severity="execution" if ok else "error",
             event_code="system.smoke_test",
@@ -3190,6 +3182,19 @@ class TraderBotLauncher(QMainWindow):
         self.state.feature_snapshot = feature_snapshot
         self.state.decision_snapshot = decision_snapshot
         self.state.filter_snapshot = filter_snapshot
+        regime_valid = filter_snapshot.get("regime_valid_for_entry", False)
+        # -- 1. Status do Mercado (Tendência + Filtro) --
+        regime_valid = filter_snapshot.get("regime_valid_for_entry", False)
+        dist_ema = _safe_float(feature_snapshot.get("dist_ema_240"))
+        
+        if not regime_valid:
+            self.state.market_status_label = "Lateral"
+        elif dist_ema is not None and dist_ema > 0:
+            self.state.market_status_label = "Alta"
+        elif dist_ema is not None and dist_ema < 0:
+            self.state.market_status_label = "Baixa"
+        else:
+            self.state.market_status_label = "Favorável"
 
         final_action = decision_snapshot.get("final_action", payload.get("final_action", 0.0))
         vote_bucket = decision_snapshot.get("vote_bucket", payload.get("vote_bucket", "--"))
@@ -3269,6 +3274,15 @@ class TraderBotLauncher(QMainWindow):
         elif payload.get("closed_trade"):
             summary_text = "Posição fechada."
             self.state.last_trade_reason_label = summary_text
+            exit_reason = str(payload.get("exit_reason") or "").lower()
+            if "take_profit" in exit_reason or "take profit" in exit_reason:
+                self.state.wins_today += 1
+            elif "stop_loss" in exit_reason or "stop loss" in exit_reason:
+                self.state.losses_today += 1
+            elif float(payload.get("position_unrealized_pnl", 0.0) or 0.0) >= 0:
+                self.state.wins_today += 1
+            else:
+                self.state.losses_today += 1
         elif blocked_reason:
             summary_text = self._human_block_label(str(blocked_reason))
             self.state.blocked_today_label = self._increment_counter_label(self.state.blocked_today_label)
@@ -3318,16 +3332,44 @@ class TraderBotLauncher(QMainWindow):
         _fit_label_height(self.balance_inline)
         self.state_message.updateGeometry()
 
-        self.signal_tile.update_tile(_display_value(self.state.signal_label, "nenhum"), tone="default")
-        reason_value = _display_value(
-            self.state.humanized_execution_summary,
-            self.state.blocker_label if self.state.blocker_label != "Sem bloqueio" else dashboard_summary,
-        )
-        self.reason_tile.update_tile(_display_value(reason_value, "indefinido"), tone="default")
-        self.price_tile.update_tile(self.state.reference_currency, tone="default")
-        self.risk_tile.update_tile(self.state.risk_label, tone="warning")
-        self.position_tile.update_tile(_display_value(self.state.position_label, "FLAT"), tone="default")
-        self.pnl_tile.update_tile(self.state.pnl_label, tone=self.state.pnl_style)
+        # 1. Status do Mercado
+        if "Alta" in self.state.market_status_label:
+            market_tone = "success" # Verde
+        elif "Baixa" in self.state.market_status_label:
+            market_tone = "error"   # Vermelho
+        elif "Lateral" in self.state.market_status_label:
+            market_tone = "default" # Cinza
+        else:
+            market_tone = "default"
+            
+        self.market_status_tile.update_tile(self.state.market_status_label, tone=market_tone)
+        
+        # 2. Drawdown
+        dd_val = _safe_float(self.state.drawdown_label.replace('%', '')) or 0.0
+        dd_tone = "error" if dd_val < -5.0 else "warning" if dd_val < -1.5 else "default"
+        self.drawdown_tile.update_tile(self.state.drawdown_label, tone=dd_tone)
+
+        # 3. Viés da IA
+        bias_tone = "success" if "Compra" in self.state.ai_bias_label else "error" if "Venda" in self.state.ai_bias_label else "muted"
+        self.ai_bias_tile.update_tile(self.state.ai_bias_label, tone=bias_tone)
+
+        # 4. Placar dos Modelos
+        score_tone = "success" if "Compra" in self.state.ensemble_score_label else "error" if "Venda" in self.state.ensemble_score_label else "muted"
+        self.ensemble_score_tile.update_tile(self.state.ensemble_score_label, tone=score_tone)
+
+        # 5. Operações Hoje
+        self.operations_tile.update_tile(_display_value(self.state.operations_today_label, "0"), tone="default")
+        
+        # 6. Win Rate
+        total_closed = self.state.wins_today + self.state.losses_today
+        if total_closed > 0:
+            win_rate = (self.state.wins_today / total_closed) * 100.0
+            win_rate_str = f"{win_rate:.1f}% ({self.state.wins_today}V - {self.state.losses_today}D)"
+            win_tone = "success" if win_rate >= 50 else "error"
+        else:
+            win_rate_str = "--"
+            win_tone = "default"
+        self.winrate_tile.update_tile(win_rate_str, tone=win_tone)
 
         self.position_pill.setText(self.state.position_label)
         position_style = "long" if self.state.position_label == "LONG" else "short" if self.state.position_label == "SHORT" else "flat"
