@@ -3323,8 +3323,8 @@ class TraderBotLauncher(QMainWindow):
             self.state.state_message = f"Posição {position_label} em andamento."
             self.state.state_style = "long" if position_label == "LONG" else "short"
         elif self.state.signal_label == "HOLD":
-            self.state.state_label = "AGUARDANDO"
-            self.state.state_message = "Sem entrada nesta barra."
+            self.state.state_label = "AGUARDANDO SINAL"
+            self.state.state_message = "Avaliando o mercado. Sem oportunidade no momento."
             self.state.state_style = "wait"
         else:
             self.state.state_label = "FLAT"
@@ -3367,7 +3367,7 @@ class TraderBotLauncher(QMainWindow):
         elif silenced_cycle_issue and payload.get("position_is_open"):
             summary_text = f"Posicao {position_label} em andamento."
         else:
-            summary_text = "Ciclo concluído sem novas entradas."
+            summary_text = "Nenhuma operação realizada nesta vela."
             self.state.last_skip_reason_label = summary_text
 
         self.state.last_decision = summary_text
@@ -3592,18 +3592,18 @@ class TraderBotLauncher(QMainWindow):
 
     def _human_block_label(self, reason: str) -> str:
         mapping = {
-            "regime_filter": "Entrada bloqueada pelo filtro",
-            "cooldown": "Entrada bloqueada pelo cooldown",
-            "force_exit_only_by_tp_sl": "Sinal ignorado: Ordem aberta",
-            "min_notional_risk": "Entrada pulada por ser abaixo do valor mínimo da corretora",
-            "exchange_position_present": "Ordem ignorada por posição já presente na corretora",
-            "duplicate_cycle_order": "Ordem ignorada para evitar ordem duplicada",
+            "regime_filter": "Bloqueio de Segurança: Volume baixo ou tendência indefinida",
+            "cooldown": "Aguardando tempo de resfriamento (Cooldown)",
+            "force_exit_only_by_tp_sl": "Ordem ignorada: Posição aberta sem TP/SL confirmado na corretora",
+            "min_notional_risk": "Filtro Reprovado: Risco abaixo do mínimo exigido pela corretora",
+            "exchange_position_present": "Ordem ignorada: Posição já aberta na corretora",
+            "duplicate_cycle_order": "Bloqueio: Evitando ordem duplicada nesta vela",
         }
         mapping.update(
             {
-                "order_cooldown": "Entrada bloqueada pelo cooldown entre ordens",
-                "open_position_locked": "Sinal ignorado: Ordem aberta.",
-                "duplicate_cycle": "Entrada ignorada para evitar ordem duplicada na mesma vela",
+                "order_cooldown": "Aguardando tempo de resfriamento entre ordens",
+                "open_position_locked": "Sinal ignorado: Já existe uma posição aberta",
+                "duplicate_cycle": "Bloqueio: Evitando entradas duplicadas na mesma vela",
             }
         )
         return mapping.get(reason, reason.replace("_", " "))

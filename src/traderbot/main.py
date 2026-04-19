@@ -865,18 +865,18 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 def _human_runtime_block_reason(reason: Any) -> str:
     reason_text = str(reason or "").strip().lower()
     mapping = {
-        "regime_filter": "entrada bloqueada pelo filtro de regime",
-        "cooldown": "entrada bloqueada pelo cooldown",
-        "order_cooldown": "entrada bloqueada pelo cooldown entre ordens",
-        "duplicate_cycle": "entrada bloqueada para evitar ordem duplicada na mesma vela",
-        "open_position_locked": "sinal ignorado porque existe posicao travada por TP/SL ou posicao em manutencao",
-        "native_tp_sl_unprotected": "posicao aberta sem TP/SL nativo confirmado na exchange",
-        "prevented_same_candle_reversal": "reversao impedida na mesma vela",
-        "min_notional_risk": "entrada pulada porque o notional minimo violaria o risco maximo",
-        "min_notional": "entrada bloqueada por notional minimo da exchange",
-        "volume_min": "entrada bloqueada por volume minimo da exchange",
+        "regime_filter": "Bloqueio de Segurança: Volume baixo ou tendência indefinida",
+        "cooldown": "Aguardando tempo de resfriamento (Cooldown)",
+        "order_cooldown": "Aguardando tempo de resfriamento entre ordens",
+        "duplicate_cycle": "Bloqueio: Evitando entradas duplicadas na mesma vela",
+        "open_position_locked": "Sinal ignorado: Já existe uma posição aberta no mercado",
+        "native_tp_sl_unprotected": "Atenção: Posição aberta sem TP/SL confirmado na corretora",
+        "prevented_same_candle_reversal": "Bloqueio: Reversão de posição impedida na mesma vela",
+        "min_notional_risk": "Filtro Reprovado: Risco violaria o valor mínimo exigido pela corretora",
+        "min_notional": "Filtro Reprovado: Volume financeiro abaixo do mínimo da corretora",
+        "volume_min": "Filtro Reprovado: Quantidade de contratos abaixo do mínimo da corretora",
     }
-    return mapping.get(reason_text, reason_text or "sem bloqueio")
+    return mapping.get(reason_text, reason_text or "Sem bloqueios")
 
 
 def _runtime_execution_action(result: dict[str, Any], position_side: int) -> str:
@@ -1171,18 +1171,26 @@ def _handle_runtime_side_effects(
 
 def _build_decision_reason(vote_info: dict[str, Any], final_action: float, hold_threshold: float) -> str:
     bucket = str(vote_info.get("bucket", "hold")).upper()
+    
+    # Tradução amigável da ação
+    if bucket == "HOLD":
+        human_bucket = "AGUARDAR"
+    elif bucket == "BUY":
+        human_bucket = "COMPRAR"
+    elif bucket == "SELL":
+        human_bucket = "VENDER"
+    else:
+        human_bucket = bucket
+
     if vote_info.get("mode") == "ensemble":
         votes = vote_info.get("votes") or {}
         return (
-            f"Ensemble decidiu {bucket} com votos "
-            f"buy={int(votes.get('buy', 0))}, hold={int(votes.get('hold', 0))}, sell={int(votes.get('sell', 0))}; "
-            f"acao final={final_action:.4f}; threshold_hold={hold_threshold:.2f}"
+            f"Decisão da IA: {human_bucket}. "
+            f"Placar -> Compras: {int(votes.get('buy', 0))} | Neutros: {int(votes.get('hold', 0))} | Vendas: {int(votes.get('sell', 0))} "
+            f"(Força do Sinal: {abs(final_action)*100:.1f}%)"
         )
-    raw_action = _as_float(vote_info.get("raw_action", final_action))
-    return (
-        f"PPO individual decidiu {bucket} com acao bruta={raw_action:.4f}; "
-        f"acao final={final_action:.4f}; threshold_hold={hold_threshold:.2f}"
-    )
+        
+    return f"Decisão da IA: {human_bucket} (Força do Sinal: {abs(final_action)*100:.1f}%)"
 
 
 def _build_runtime_cycle_log(
