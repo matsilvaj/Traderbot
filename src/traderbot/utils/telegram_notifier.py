@@ -90,7 +90,7 @@ class TelegramNotifier:
         *,
         status: str | None = None,
     ) -> bool:
-        return self._send_message("Erro\nStatus: Offline")
+        return self._send_message("Erro\nVerifique os logs para mais detalhes.")
 
     def _send_message(self, text: str) -> bool:
         if not self.enabled:

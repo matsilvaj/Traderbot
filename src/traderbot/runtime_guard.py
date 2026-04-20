@@ -59,7 +59,16 @@ def write_runtime_state(path: Path, payload: dict[str, Any]) -> None:
     temp_path = path.with_suffix(f"{path.suffix}.tmp")
     with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
-    temp_path.replace(path)
+    
+    try:
+        temp_path.replace(path)
+    except PermissionError:
+        # Se bloqueado no Windows, aguarda brevemente e tenta novamente
+        time.sleep(0.05)
+        try:
+            temp_path.replace(path)
+        except Exception:
+            pass
 
 
 def read_runtime_state(path: Path) -> dict[str, Any] | None:

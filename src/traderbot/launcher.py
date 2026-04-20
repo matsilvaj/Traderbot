@@ -1990,8 +1990,8 @@ class TraderBotLauncher(QMainWindow):
             event = self._new_event(
                 source="launcher",
                 event_type="generic",
-                raw_line="Parando bot com posição aberta.",
-                message="Parando bot com posição aberta.",
+                raw_line="Parando bot com posição aberta",
+                message="Parando bot com posição aberta",
                 severity="warning",
                 event_code="system.runtime_stop_requested_open_position",
             )
@@ -3341,7 +3341,7 @@ class TraderBotLauncher(QMainWindow):
             self.state.position_status = "Nenhuma Ordem Aberta"
 
         if payload.get("opened_trade"):
-            summary_text = "Posição aberta."
+            summary_text = "Posição aberta"
             self.state.operations_today_label = self._increment_counter_label(self.state.operations_today_label)
             self.state.last_trade_reason_label = summary_text
         elif payload.get("closed_trade"):

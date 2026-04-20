@@ -687,10 +687,12 @@ class HyperliquidExecutor:
     def _stop_take_prices(self, entry_price: float, side: int) -> tuple[float | None, float | None]:
         if side == 0 or entry_price <= 0:
             return None, None
-        stop_price = float(entry_price * (1.0 - self.stop_loss_pct * side))
-        take_price = float(entry_price * (1.0 + self.take_profit_pct * side))
-        return stop_price, take_price
-
+            
+        raw_stop = entry_price * (1.0 - self.stop_loss_pct * side)
+        raw_take = entry_price * (1.0 + self.take_profit_pct * side)
+        
+        return round(raw_stop, 6), round(raw_take, 6)
+    
     def _trade_units(self, volume: float) -> float:
         if not bool(getattr(self.env_cfg, "use_broker_constraints", True)):
             return 1.0
@@ -1135,6 +1137,12 @@ class HyperliquidExecutor:
             "canceled": len(cancel_requests),
             "response": response,
         }
+        
+    def _slippage_price(self, symbol: str, is_buy: bool, slippage: float, price: float) -> float:
+        """Calcula o preço com slippage aplicado para ordens de limite agressivas."""
+        if is_buy:
+            return price * (1.0 + slippage)
+        return price * (1.0 - slippage)
 
     def _build_native_tp_sl_orders(self, snapshot: dict) -> tuple[list[dict], float | None, float | None]:
         side = int(snapshot.get("side", 0) or 0)
@@ -1893,7 +1901,7 @@ class HyperliquidExecutor:
                             close_is_buy,
                             volume,
                             float(stop_loss_price),
-                            order_type={"trigger": {"triggerPx": float(stop_loss_price), "isMarket": True}},
+                            order_type={"trigger": {"triggerPx": float(stop_loss_price), "isMarket": True, "tpsl": "sl"}},
                             reduce_only=True,
                         ),
                     )
@@ -1909,7 +1917,7 @@ class HyperliquidExecutor:
                             close_is_buy,
                             volume,
                             float(take_profit_price),
-                            order_type={"trigger": {"triggerPx": float(take_profit_price), "isMarket": True}},
+                            order_type={"trigger": {"triggerPx": float(take_profit_price), "isMarket": True, "tpsl": "tp"}},
                             reduce_only=True,
                         ),
                     )
