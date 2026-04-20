@@ -2682,8 +2682,8 @@ class TraderBotLauncher(QMainWindow):
         self.state.blocked_today_label = "0"
         self.state.wins_today = 0
         self.state.losses_today = 0
-        self.state.last_trade_reason_label = "Nenhuma operação hoje."
-        self.state.last_skip_reason_label = "Nenhum bloqueio recente."
+        self.state.last_trade_reason_label = "Nenhuma operação hoje"
+        self.state.last_skip_reason_label = "Nenhum bloqueio recente"
 
     def _increment_counter_label(self, current_value: str) -> str:
         try:
@@ -3361,13 +3361,13 @@ class TraderBotLauncher(QMainWindow):
                 self.state.losses_today += 1
         elif blocked_reason:
             reason_human = self._human_block_label(str(blocked_reason))
-            summary_text = f"Mercado Desfavorável: {reason_human}"
+            summary_text = f"Mercado Desfavorável | {reason_human}"
             self.state.blocked_today_label = self._increment_counter_label(self.state.blocked_today_label)
             self.state.last_skip_reason_label = reason_human
         elif silenced_cycle_issue and payload.get("position_is_open"):
-            summary_text = f"Posicao {position_label} em andamento."
+            summary_text = f"Posição {position_label} em andamento"
         else:
-            summary_text = "Nenhuma operação realizada nesta vela."
+            summary_text = "Nenhuma operação realizada nesta vela"
             self.state.last_skip_reason_label = summary_text
 
         self.state.last_decision = summary_text
@@ -3592,7 +3592,7 @@ class TraderBotLauncher(QMainWindow):
 
     def _human_block_label(self, reason: str) -> str:
         mapping = {
-            "regime_filter": "Bloqueio de Segurança: Volume baixo ou tendência indefinida",
+            "regime_filter": "Condição de baixo volume ou lateralização",
             "cooldown": "Aguardando tempo de resfriamento (Cooldown)",
             "force_exit_only_by_tp_sl": "Ordem ignorada: Posição aberta sem TP/SL confirmado na corretora",
             "min_notional_risk": "Filtro Reprovado: Risco abaixo do mínimo exigido pela corretora",
