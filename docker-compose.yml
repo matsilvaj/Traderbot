@@ -16,7 +16,7 @@ services:
     volumes:
       - .:/app
     working_dir: /app
-    command: ["python", "-m", "traderbot.main", "--config", "config.yaml", "run"]
+    command: python telegram_panel.py
     restart: unless-stopped
 
   db:
