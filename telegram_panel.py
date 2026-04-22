@@ -82,11 +82,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Ele executa o trade bot como um subprocesso dentro do mesmo container
     cmd = [
-        "python", "-m", "traderbot.main", "run",
+        "python", "-m", "traderbot.main",
         "--config", str(CONFIG_PATH),
         "--network-override", "mainnet",
         "--execution-mode-override", "exchange",
-        "--allow-live-trading"
+        "--allow-live-trading",
+        "run"
     ]
     
     trade_process = subprocess.Popen(cmd, cwd=str(REPO_ROOT))
