@@ -25,14 +25,14 @@ features:
 environment:
   initial_balance: 250.0
   simulation_initial_balance: 250.0
-  max_risk_per_trade: 0.01
+  max_risk_per_trade: 0.03
   action_hold_threshold: 0.6
   regime_min_abs_dist_ema_240: 0.025
   regime_min_vol_regime_z: 0.3
   taker_fee_pct: 0.00045
   slippage_pct: 0.0001
-  stop_loss_pct: 0.02
-  take_profit_pct: 0.05
+  stop_loss_pct: 0.01
+  take_profit_pct: 0.015
   force_exit_only_by_tp_sl: true
   reward_clip_limit: 5.0
   pain_decay_factor: 0.0
