@@ -1162,6 +1162,8 @@ def _handle_runtime_side_effects(
                 side=open_side,
                 price=open_price,
                 quantity=open_notional if open_notional > 0 else open_amount,
+                take_profit=result.get("take_profit_price"),
+                stop_loss=result.get("stop_loss_price"),
             )
 
     # Envia notificação de fechamento

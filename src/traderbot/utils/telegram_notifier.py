@@ -50,12 +50,22 @@ class TelegramNotifier:
         side: str,
         price: float | int,
         quantity: float | int,
+        take_profit: float | int | None = None,
+        stop_loss: float | int | None = None,
     ) -> bool:
+        
+        # Formata os valores caso existam, senão exibe N/A
+        tp_str = self._format_brl_number(take_profit, places=2) if take_profit else "N/A"
+        sl_str = self._format_brl_number(stop_loss, places=2) if stop_loss else "N/A"
+
         lines = [
             f"ENTRADA {self._normalize_entry_side_label(side)}",
             f"Quantidade: ${self._format_brl_number(quantity, places=2)}",
             f"Preço: ${self._format_brl_number(price, places=2)}",
+            f"TP: ${tp_str}",
+            f"SL: ${sl_str}",
         ]
+        
         return self._send_message("\n".join(lines))
 
     def notify_position_closed(
