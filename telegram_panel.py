@@ -51,13 +51,11 @@ def salvar_config(config_data):
         yaml.safe_dump(config_data, f, sort_keys=False, allow_unicode=True)
 
 def ler_status_runtime():
-    """Lê o arquivo de estado gerado pelo RuntimeGuard (o mesmo usado pelo launcher.py)"""
-    # Procura o arquivo de estado mais recente na pasta logs
+    """Lê o arquivo de estado gerado pelo RuntimeGuard"""
     arquivos_estado = list(LOGS_DIR.glob("state_mainnet_*.json"))
     if not arquivos_estado:
         return None
     
-    # Pega o arquivo modificado mais recentemente
     arquivo_recente = max(arquivos_estado, key=os.path.getmtime)
     try:
         with open(arquivo_recente, "r", encoding="utf-8") as f:
@@ -65,148 +63,151 @@ def ler_status_runtime():
     except Exception:
         return None
 
+def v_num(valor, default=0.0):
+    """Garante que valores nulos sejam tratados como 0.0."""
+    return float(valor) if valor is not None else default
+
+def calcular_estatisticas_diarias():
+    """Varre os logs do dia para calcular trades, blocos e winrate."""
+    hoje = date.today().isoformat()
+    arquivos = list(LOGS_DIR.glob("state_mainnet_*.json"))
+    
+    stats = {"abertas": 0, "fechadas": 0, "bloqueadas": 0, "vitorias": 0, "derrotas": 0}
+    
+    for arq in arquivos:
+        try:
+            with open(arq, "r") as f:
+                dados = json.load(f)
+                payload = dados.get("last_cycle_payload", {})
+                ts = payload.get("timestamp", "")
+                
+                if hoje in ts:
+                    if payload.get("blocked_reason"): stats["bloqueadas"] += 1
+                    if payload.get("opened_trade"): stats["abertas"] += 1
+                    if payload.get("closed_trade"):
+                        stats["fechadas"] += 1
+                        pnl = v_num(payload.get("position_unrealized_pnl"))
+                        if pnl > 0: stats["vitorias"] += 1
+                        else: stats["derrotas"] += 1
+        except: continue
+        
+    total_encerradas = stats["vitorias"] + stats["derrotas"]
+    stats["winrate"] = (stats["vitorias"] / total_encerradas * 100) if total_encerradas > 0 else 0.0
+    return stats
 
 # =====================================================================
 # 4. COMANDOS DO BOT (START, OFF, STATUS, ETC)
 # =====================================================================
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inicia as operações na Mainnet."""
-    if not verificar_autorizacao(update): return
-    
-    global trade_process
-    if trade_process is not None and trade_process.poll() is None:
-        await update.message.reply_text("O Bot já está rodando!")
-        return
-
-    await update.message.reply_text("Iniciando o TraderBot na MAINNET com live trading ativado...")
-    
-    # Ele executa o trade bot como um subprocesso dentro do mesmo container
-    cmd = [
-        "python", "-m", "traderbot.main",
-        "--config", str(CONFIG_PATH),
-        "--network-override", "mainnet",
-        "--execution-mode-override", "exchange",
-        "--allow-live-trading",
-        "run"
-    ]
-    
-    trade_process = subprocess.Popen(cmd, cwd=str(REPO_ROOT))
-    await update.message.reply_text("Bot iniciado com sucesso em background!")
-
-async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Para as operações do bot."""
-    if not verificar_autorizacao(update): return
-    
-    global trade_process
-    if trade_process is None or trade_process.poll() is not None:
-        await update.message.reply_text("O bot já está desligado.")
-        return
-
-    await update.message.reply_text("Desligando o bot... (Fechando processos)")
-    trade_process.terminate()
-    trade_process.wait()
-    trade_process = None
-    
-    await update.message.reply_text("ot encerrado.")
-
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra o status detalhado, IA e filtros."""
     if not verificar_autorizacao(update): return
     
     global trade_process
     is_running = trade_process is not None and trade_process.poll() is None
-    
     estado = ler_status_runtime()
     
     if not is_running:
-        await update.message.reply_text("*Status:* Bot DESLIGADO.", parse_mode="Markdown")
+        await update.message.reply_text("🔴 *STATUS:* Bot DESLIGADO.", parse_mode="Markdown")
         return
-    elif estado is None or not estado.get("last_cycle_payload"):
-        await update.message.reply_text("*Status:* Bot LIGADO, aguardando o primeiro ciclo do mercado...", parse_mode="Markdown")
+    if not estado or not estado.get("last_cycle_payload"):
+        await update.message.reply_text("🟢 *STATUS:* Bot LIGADO, aguardando dados do mercado...", parse_mode="Markdown")
         return
 
-    # Extrai os sub-dicionários do payload rico gerado pelo main.py
     payload = estado.get("last_cycle_payload", {})
     decision = payload.get("decision", {})
     filters = payload.get("filters", {})
-    execution = payload.get("execution", {})
+    exec_info = payload.get("execution", {})
 
-    # Status da Posição
-    pos_label = execution.get("position_label", payload.get("position_label", "FLAT"))
-    pnl = execution.get("position_unrealized_pnl", payload.get("position_unrealized_pnl", 0.0))
-    entry_price = execution.get("position_avg_entry_price", payload.get("position_avg_entry_price", 0.0))
-    bloqueio = filters.get("blocked_reason_human", payload.get("blocked_reason_human", None))
-
-    msg = f"*STATUS DO BOT LIGADO*\n\n"
-    msg += f"*Posição Atual:* {pos_label}\n"
-    if pos_label != "FLAT":
-        msg += f"*PnL Aberto:* ${pnl:.2f}\n"
-        msg += f"*Preço Médio:* ${entry_price:.4f}\n"
-
-    # Decisão da IA e Votação
-    msg += f"\n*DECISÃO DA IA (Ensemble):*\n"
-    msg += f"• Motivo: {decision.get('reason', payload.get('decision_reason', 'Avaliando...'))}\n"
+    msg = f"🛰️ *MONITORAMENTO EM TEMPO REAL*\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━\n"
     
+    # --- 1. Estado da Posição ---
+    pos_label = exec_info.get("position_label", payload.get("position_label", "FLAT"))
+    if pos_label == "FLAT":
+        msg += f"📊 *Estado da Posição:* FLAT (Sem posições abertas)\n\n"
+    else:
+        pnl = v_num(exec_info.get("position_unrealized_pnl", payload.get("position_unrealized_pnl")))
+        msg += f"📊 *Estado da Posição:* {pos_label}\n"
+        msg += f"💰 *PnL Atual:* ${pnl:.2f}\n\n"
+
+    # --- 2. Decisão da IA ---
+    bucket_raw = decision.get("vote_bucket", payload.get("vote_bucket", "hold"))
+    if bucket_raw.lower() == "hold": dec_str = "AGUARDAR"
+    elif bucket_raw.lower() == "buy": dec_str = "COMPRAR"
+    elif bucket_raw.lower() == "sell": dec_str = "VENDER"
+    else: dec_str = str(bucket_raw).upper()
+
+    conf = v_num(decision.get("confidence_pct", payload.get("confidence_pct")))
     votes = decision.get("votes", payload.get("votes", {}))
-    if votes:
-        msg += f"• Placar: 🟢 {votes.get('buy', 0)} Compra | 🟡 {votes.get('hold', 0)} Neutro | 🔴 {votes.get('sell', 0)} Venda\n"
+    
+    msg += f"🧠 *DECISÃO DA IA (Ensemble):*\n"
+    msg += f"• Decisão Final: {dec_str} (Força: {conf:.1f}%)\n"
+    msg += f"• Placar: 🟢 {votes.get('buy', 0)} Compra | 🟡 {votes.get('hold', 0)} Neutro | 🔴 {votes.get('sell', 0)} Venda\n\n"
 
-    model_votes = decision.get("model_votes", payload.get("model_votes", {}))
-    if model_votes:
-        msg += "• Votação Individual:\n"
-        for model, vote in model_votes.items():
-            emoji = "🟢" if vote > 0 else "🔴" if vote < 0 else "🟡"
-            msg += f"  └ {model}: {vote:.2f} {emoji}\n"
+    # --- 3. Filtros ---
+    regime_ok = filters.get("regime_valid_for_entry", payload.get("regime_valid"))
+    regime_str = "✅ Regime de Mercado (Permitido)" if regime_ok else "❌ Regime de Mercado (Bloqueado)"
+    vol_z = v_num(filters.get("regime_vol_regime_z", payload.get("regime_vol_regime_z")))
+    dist_ema = v_num(filters.get("regime_dist_ema_240", payload.get("regime_dist_ema_240")))
 
-    # Status dos Filtros de Proteção
-    msg += f"\n*FILTROS DE ENTRADA:*\n"
-    regime_valid = "Passou" if filters.get('regime_valid_for_entry', payload.get('regime_valid')) else "Reprovado"
-    msg += f"• Regime Geral: {regime_valid}\n"
-    msg += f"• Distância EMA 240: {filters.get('regime_dist_ema_240', payload.get('regime_dist_ema_240', 0.0)):.4f}\n"
-    msg += f"• Volatilidade Z-Score: {filters.get('regime_vol_regime_z', payload.get('regime_vol_regime_z', 0.0)):.2f}\n"
+    msg += f"🛡️ *CHECK DE FILTROS:*\n"
+    msg += f"{regime_str}\n"
+    msg += f"  └ Volatilidade Z: {vol_z:.2f}\n"
+    msg += f"  └ Dist. EMA 240: {dist_ema:.4f}\n"
 
-    # Se houver algum bloqueio ativo impedindo trades
+    bloqueio = filters.get("blocked_reason_human", payload.get("blocked_reason_human"))
     if bloqueio:
-        msg += f"\n🚧 *BLOQUEIO ATUAL:*\n{bloqueio}\n"
+        msg += f"\n🚧 *MOTIVO DO BLOQUEIO:*\n{bloqueio}\n"
 
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-
 async def cmd_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostra os dados de capital, risco e dimensionamento."""
+    """Mostra os dados financeiros e de risco."""
     if not verificar_autorizacao(update): return
     
     estado = ler_status_runtime()
     if not estado or not estado.get("last_cycle_payload"):
-        await update.message.reply_text("Ainda não há dados suficientes no ciclo atual para gerar o dashboard.")
+        await update.message.reply_text("Sem dados disponíveis.")
         return
 
     payload = estado.get("last_cycle_payload", {})
     sizing = payload.get("sizing", {})
     market = payload.get("market_snapshot", {})
+    
+    stats = calcular_estatisticas_diarias()
+    hoje_str = datetime.now().strftime("%d/%m")
 
-    # Extraindo dados financeiros
-    saldo = sizing.get("sizing_balance_used", payload.get("sizing_balance_used", 0.0))
-    disp = sizing.get("available_to_trade", payload.get("available_to_trade", 0.0))
-    risk_pct = sizing.get("risk_pct", payload.get("risk_pct", 0.0))
-    risk_amt = sizing.get("risk_amount", payload.get("risk_amount", 0.0))
-    vol = sizing.get("adjusted_volume", payload.get("adjusted_volume", 0.0))
-    
-    ref_price = market.get("reference_price", payload.get("reference_price", 0.0))
+    # Extração de dados com proteção contra nulls
+    saldo = v_num(sizing.get("sizing_balance_used") or payload.get("sizing_balance_used"))
+    disp = v_num(sizing.get("available_to_trade") or payload.get("available_to_trade"))
+    risco = v_num(sizing.get("risk_pct") or payload.get("risk_pct")) * 100
+    expo = v_num(sizing.get("risk_amount") or payload.get("risk_amount"))
+    contratos = v_num(sizing.get("adjusted_volume") or payload.get("adjusted_volume"))
+    ref_price = v_num(market.get("reference_price") or payload.get("reference_price"))
 
-    msg = f"*DASHBOARD FINANCEIRO E RISCO*\n\n"
-    msg += f"*Capital Base Utilizado:* ${saldo:.2f}\n"
-    msg += f"*Disponível na Corretora:* ${disp:.2f}\n\n"
+    msg = f"📈 *DASHBOARD DE PERFORMANCE*\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━\n"
     
-    msg += f"*Gerenciamento de Risco (Próxima Trade):*\n"
-    msg += f"• Risco Máximo: {risk_pct * 100:.2f}%\n"
-    msg += f"• Exposição (Stop-Loss): ${risk_amt:.2f}\n"
-    msg += f"• Contratos Calculados: {vol}\n\n"
+    if saldo > 0 or disp > 0:
+        msg += f"💵 *Capital Base:* ${saldo:.2f}\n"
+        msg += f"🏦 *Disponível:* ${disp:.2f}\n"
+        msg += f"⚠️ *Risco Configurado:* {risco:.1f}%\n"
+        msg += f"📏 *Exposição Atual:* ${expo:.2f}\n"
+        msg += f"⚖️ *Contratos Estimados:* {contratos}\n\n"
+    else:
+        msg += "⏳ *Consultando Exchange...* (Aguardando IA calcular lote)\n\n"
+
+    msg += f"📅 *RESUMO DE HOJE ({hoje_str}):*\n"
+    msg += f"✅ Abertas: {stats['abertas']}\n"
+    msg += f"🧱 Bloqueadas: {stats['bloqueadas']}\n"
+    msg += f"🏁 Encerradas: {stats['fechadas']}\n"
+    msg += f"🎯 Winrate: {stats['winrate']:.1f}%\n\n"
     
-    msg += f"*Mercado (Símbolo Atual):*\n"
-    msg += f"• Preço Atual (Tick): ${ref_price:.4f}\n"
+    msg += f"📊 *Mercado:* BTC em ${ref_price:.2f}"
 
     await update.message.reply_text(msg, parse_mode="Markdown")
+    
+    
 async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Altera configurações rapidamente."""
     if not verificar_autorizacao(update): return
