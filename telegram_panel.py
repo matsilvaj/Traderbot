@@ -110,7 +110,7 @@ async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("ot encerrado.")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostra o que o bot está fazendo agora."""
+    """Mostra o status detalhado, IA e filtros."""
     if not verificar_autorizacao(update): return
     
     global trade_process
@@ -119,46 +119,94 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     estado = ler_status_runtime()
     
     if not is_running:
-        msg = "*Status:* Bot DESLIGADO."
-    elif estado is None:
-        msg = "*Status:* Bot LIGADO, mas aguardando o primeiro ciclo do mercado..."
-    else:
-        # Extrai os dados do json gerado pelo main.py
-        payload = estado.get("last_cycle_payload", {})
-        pos_label = payload.get("position_label", "FLAT")
-        motivo = payload.get("decision_reason", "Avaliando mercado...")
-        bloqueio = payload.get("blocked_reason_human", "Nenhum")
-        pnl = payload.get("position_unrealized_pnl", 0.0)
-        
-        msg = f"*Status:* Bot LIGADO\n\n"
-        msg += f"*Posição Atual:* {pos_label}\n"
-        
-        if pos_label != "FLAT":
-            msg += f"*PnL Aberto:* ${pnl:.2f}\n"
-            
-        msg += f"IA:* {motivo}\n"
-        if bloqueio:
-            msg += f"*Filtro/Bloqueio:* {bloqueio}\n"
+        await update.message.reply_text("*Status:* Bot DESLIGADO.", parse_mode="Markdown")
+        return
+    elif estado is None or not estado.get("last_cycle_payload"):
+        await update.message.reply_text("*Status:* Bot LIGADO, aguardando o primeiro ciclo do mercado...", parse_mode="Markdown")
+        return
+
+    # Extrai os sub-dicionários do payload rico gerado pelo main.py
+    payload = estado.get("last_cycle_payload", {})
+    decision = payload.get("decision", {})
+    filters = payload.get("filters", {})
+    execution = payload.get("execution", {})
+
+    # Status da Posição
+    pos_label = execution.get("position_label", payload.get("position_label", "FLAT"))
+    pnl = execution.get("position_unrealized_pnl", payload.get("position_unrealized_pnl", 0.0))
+    entry_price = execution.get("position_avg_entry_price", payload.get("position_avg_entry_price", 0.0))
+    bloqueio = filters.get("blocked_reason_human", payload.get("blocked_reason_human", None))
+
+    msg = f"*STATUS DO BOT LIGADO*\n\n"
+    msg += f"*Posição Atual:* {pos_label}\n"
+    if pos_label != "FLAT":
+        msg += f"*PnL Aberto:* ${pnl:.2f}\n"
+        msg += f"*Preço Médio:* ${entry_price:.4f}\n"
+
+    # Decisão da IA e Votação
+    msg += f"\n*DECISÃO DA IA (Ensemble):*\n"
+    msg += f"• Motivo: {decision.get('reason', payload.get('decision_reason', 'Avaliando...'))}\n"
+    
+    votes = decision.get("votes", payload.get("votes", {}))
+    if votes:
+        msg += f"• Placar: 🟢 {votes.get('buy', 0)} Compra | 🟡 {votes.get('hold', 0)} Neutro | 🔴 {votes.get('sell', 0)} Venda\n"
+
+    model_votes = decision.get("model_votes", payload.get("model_votes", {}))
+    if model_votes:
+        msg += "• Votação Individual:\n"
+        for model, vote in model_votes.items():
+            emoji = "🟢" if vote > 0 else "🔴" if vote < 0 else "🟡"
+            msg += f"  └ {model}: {vote:.2f} {emoji}\n"
+
+    # Status dos Filtros de Proteção
+    msg += f"\n*FILTROS DE ENTRADA:*\n"
+    regime_valid = "Passou" if filters.get('regime_valid_for_entry', payload.get('regime_valid')) else "Reprovado"
+    msg += f"• Regime Geral: {regime_valid}\n"
+    msg += f"• Distância EMA 240: {filters.get('regime_dist_ema_240', payload.get('regime_dist_ema_240', 0.0)):.4f}\n"
+    msg += f"• Volatilidade Z-Score: {filters.get('regime_vol_regime_z', payload.get('regime_vol_regime_z', 0.0)):.2f}\n"
+
+    # Se houver algum bloqueio ativo impedindo trades
+    if bloqueio:
+        msg += f"\n🚧 *BLOQUEIO ATUAL:*\n{bloqueio}\n"
 
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+
 async def cmd_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostra os dados de capital, win rate, drawdown, etc."""
+    """Mostra os dados de capital, risco e dimensionamento."""
     if not verificar_autorizacao(update): return
     
     estado = ler_status_runtime()
-    if not estado:
+    if not estado or not estado.get("last_cycle_payload"):
         await update.message.reply_text("Ainda não há dados suficientes no ciclo atual para gerar o dashboard.")
         return
 
     payload = estado.get("last_cycle_payload", {})
-    saldo = payload.get("sizing_balance_used", 0.0)
-    
-    msg = f"*DASHBOARD DE OPERAÇÕES*\n\n"
-    msg += f"*Capital Atual:* ${saldo:.2f}\n"
-    
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    sizing = payload.get("sizing", {})
+    market = payload.get("market_snapshot", {})
 
+    # Extraindo dados financeiros
+    saldo = sizing.get("sizing_balance_used", payload.get("sizing_balance_used", 0.0))
+    disp = sizing.get("available_to_trade", payload.get("available_to_trade", 0.0))
+    risk_pct = sizing.get("risk_pct", payload.get("risk_pct", 0.0))
+    risk_amt = sizing.get("risk_amount", payload.get("risk_amount", 0.0))
+    vol = sizing.get("adjusted_volume", payload.get("adjusted_volume", 0.0))
+    
+    ref_price = market.get("reference_price", payload.get("reference_price", 0.0))
+
+    msg = f"*DASHBOARD FINANCEIRO E RISCO*\n\n"
+    msg += f"*Capital Base Utilizado:* ${saldo:.2f}\n"
+    msg += f"*Disponível na Corretora:* ${disp:.2f}\n\n"
+    
+    msg += f"*Gerenciamento de Risco (Próxima Trade):*\n"
+    msg += f"• Risco Máximo: {risk_pct * 100:.2f}%\n"
+    msg += f"• Exposição (Stop-Loss): ${risk_amt:.2f}\n"
+    msg += f"• Contratos Calculados: {vol}\n\n"
+    
+    msg += f"*Mercado (Símbolo Atual):*\n"
+    msg += f"• Preço Atual (Tick): ${ref_price:.4f}\n"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
 async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Altera configurações rapidamente."""
     if not verificar_autorizacao(update): return

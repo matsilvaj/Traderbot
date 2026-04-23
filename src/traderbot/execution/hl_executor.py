@@ -1027,6 +1027,13 @@ class HyperliquidExecutor:
     def _price_tolerance(self) -> float:
         spec = self.get_symbol_trading_spec()
         return max(float(spec.point), 1e-8)
+    
+    def _round_price(self, price: float) -> float:
+        """Arredonda o preço para a precisão exata aceite pela Hyperliquid."""
+        spec = self.get_symbol_trading_spec()
+        tick_size = spec.point if spec.point > 0 else 1.0
+        rounded = round(price / tick_size) * tick_size
+        return float(f"{rounded:.5g}")
 
     def _size_tolerance(self) -> float:
         spec = self.get_symbol_trading_spec()
@@ -1153,8 +1160,8 @@ class HyperliquidExecutor:
             return [], stop_loss_price, take_profit_price
 
         close_is_buy = side < 0
-        sl_limit_px = self._slippage_price(str(self.hl_cfg.symbol), close_is_buy, 0.10, stop_loss_price)
-        tp_limit_px = self._slippage_price(str(self.hl_cfg.symbol), close_is_buy, 0.10, take_profit_price)
+        sl_limit_px = self._round_price(self._slippage_price(str(self.hl_cfg.symbol), close_is_buy, 0.10, stop_loss_price))
+        tp_limit_px = self._round_price(self._slippage_price(str(self.hl_cfg.symbol), close_is_buy, 0.10, take_profit_price))
         orders = [
             {
                 "coin": str(self.hl_cfg.symbol),
@@ -1163,7 +1170,7 @@ class HyperliquidExecutor:
                 "limit_px": float(sl_limit_px),
                 "order_type": {
                     "trigger": {
-                        "triggerPx": float(stop_loss_price),
+                        "triggerPx": self._round_price(stop_loss_price),
                         "isMarket": True,
                         "tpsl": "sl",
                     }
@@ -1177,7 +1184,7 @@ class HyperliquidExecutor:
                 "limit_px": float(tp_limit_px),
                 "order_type": {
                     "trigger": {
-                        "triggerPx": float(take_profit_price),
+                        "triggerPx": self._round_price(take_profit_price),
                         "isMarket": True,
                         "tpsl": "tp",
                     }
@@ -1900,8 +1907,8 @@ class HyperliquidExecutor:
                             str(self.hl_cfg.symbol),
                             close_is_buy,
                             volume,
-                            float(stop_loss_price),
-                            order_type={"trigger": {"triggerPx": float(stop_loss_price), "isMarket": True, "tpsl": "sl"}},
+                            float(self._round_price(stop_loss_price)),  # Preço arredondado
+                            order_type={"trigger": {"triggerPx": float(self._round_price(stop_loss_price)), "isMarket": True, "tpsl": "sl"}},  # Trigger arredondado
                             reduce_only=True,
                         ),
                     )
@@ -1916,8 +1923,8 @@ class HyperliquidExecutor:
                             str(self.hl_cfg.symbol),
                             close_is_buy,
                             volume,
-                            float(take_profit_price),
-                            order_type={"trigger": {"triggerPx": float(take_profit_price), "isMarket": True, "tpsl": "tp"}},
+                            float(self._round_price(take_profit_price)),  # Preço arredondado
+                            order_type={"trigger": {"triggerPx": float(self._round_price(take_profit_price)), "isMarket": True, "tpsl": "tp"}},  # Trigger arredondado
                             reduce_only=True,
                         ),
                     )
