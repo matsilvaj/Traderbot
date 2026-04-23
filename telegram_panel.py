@@ -84,7 +84,7 @@ def ler_status_runtime(network: str = TARGET_NETWORK) -> dict | None:
 
     for candidate in candidate_paths:
         if not candidate.exists():
-             continue
+            continue
         try:
             with open(candidate, "r", encoding="utf-8") as f:
                 payload = json.load(f) or {}
@@ -290,20 +290,20 @@ def _build_runtime_snapshot(runtime_state: dict | None, exchange_status: dict | 
 
     if runtime_alive:
         runtime_label = RUNTIME_STATUS_LABELS.get(status_code, "RODANDO")
-        runtime_emoji = "??" if status_code in {"running", "starting"} else "??"
+        runtime_emoji = "🟢" if status_code in {"running", "starting"} else "🟡"
     elif not runtime_state:
         runtime_label = "PARADO"
-        runtime_emoji = "??"
+        runtime_emoji = "🔴"
     elif status_code in RUNTIME_STATUS_LABELS:
         runtime_label = RUNTIME_STATUS_LABELS[status_code]
-        runtime_emoji = "??" if "guard" in status_code or status_code == "stopping" else "??"
+        runtime_emoji = "🟡" if "guard" in status_code or status_code == "stopping" else "🔴"
     else:
         runtime_label = "SEM HEARTBEAT"
-        runtime_emoji = "??"
-        
+        runtime_emoji = "🔴"
+
     situation_label = runtime_label
     situation_message = "Nenhum runtime compartilhado encontrado."
-    
+
     blocked_reason_human = str(
         payload.get("blocked_reason_human")
         or (payload.get("filters") or {}).get("blocked_reason_human")
@@ -374,7 +374,7 @@ def _build_runtime_snapshot(runtime_state: dict | None, exchange_status: dict | 
     else:
         situation_label = "PARADO"
         situation_message = "Bot desligado."
-        
+
     return {
         "alive": runtime_alive,
         "runtime_label": runtime_label,
@@ -440,7 +440,6 @@ def calcular_estatisticas_diarias(network: str = TARGET_NETWORK) -> dict:
                         stats["fechadas"] += 1
                         pnl = v_num(payload.get("position_unrealized_pnl"))
                         stats["pnl_fechado"] += pnl
-                  
                         if pnl > 0:
                             stats["vitorias"] += 1
                         else:
@@ -586,11 +585,12 @@ def _model_vote_summary(payload: dict) -> str:
     for model_name, raw_action in model_votes.items():
         vote_value = v_num(raw_action, 0.0)
         if vote_value >= hold_threshold:
-            emoji = "??"
+            emoji = "🟢"
         elif vote_value <= -hold_threshold:
-            emoji = "??"
+            emoji = "🔴"
         else:
-            emoji = "??"
+            emoji = "🟡"
+            
         short_name = str(model_name).split("_s")[-1] if "_s" in str(model_name) else str(model_name)
         fragments.append(f"S{short_name} {vote_value:+.3f} {emoji}")
     return " | ".join(fragments)
@@ -626,32 +626,32 @@ def _build_alert_lines(runtime: dict, exchange_status: dict | None, exchange_err
         or ""
     ).strip()
     if blocked_reason:
-        alerts.append(f"?? <b>Bloqueio:</b> {html.escape(_human_block_label(blocked_reason))}")
+        alerts.append(f"<b>Bloqueio:</b> {html.escape(_human_block_label(blocked_reason))}")
 
     manual_protection_message = str(payload.get("manual_protection_message") or "").strip()
     if payload.get("manual_protection_required"):
         alerts.append(
-             f"??? <b>Proteção manual:</b> {html.escape(manual_protection_message or 'TP/SL precisa de confirmação manual.')}"
+            f"<b>Proteção manual:</b> {html.escape(manual_protection_message or 'TP/SL precisa de confirmação manual.')}"
         )
 
     if runtime.get("last_cycle_error"):
         error_at = _format_local_dt(runtime.get("last_cycle_error_at"), default="--")
         alerts.append(
-            f"? <b>Último erro:</b> {html.escape(_clip(runtime.get('last_cycle_error')))}"
+            f"<b>Último erro:</b> {html.escape(_clip(runtime.get('last_cycle_error')))}"
             f" ({html.escape(error_at)})"
         )
 
     guard_result = runtime.get("guard_result") or {}
     if guard_result:
         alerts.append(
-            f"?? <b>Guard:</b> {html.escape(str(guard_result.get('message') or guard_result.get('trigger') or 'atuação registrada'))}"
+            f"<b>Guard:</b> {html.escape(str(guard_result.get('message') or guard_result.get('trigger') or 'atuação registrada'))}"
         )
 
     if isinstance(exchange_status, dict) and exchange_status.get("position_is_open") and not exchange_status.get("native_tp_sl_protected"):
-        alerts.append("?? <b>TP/SL nativo:</b> a posição aberta ainda não está totalmente protegida.")
+        alerts.append("<b>TP/SL nativo:</b> a posição aberta ainda não está totalmente protegida.")
 
     if exchange_error:
-        alerts.append(f"?? <b>Exchange:</b> {html.escape(_clip(exchange_error, limit=140))}")
+        alerts.append(f"<b>Exchange:</b> {html.escape(_clip(exchange_error, limit=140))}")
 
     return alerts
 
@@ -795,7 +795,7 @@ def ler_logs_recentes(filter_text: str | None = None, limit: int = 8) -> list[st
 
 def _build_logs_message(filter_text: str | None, lines: list[str], limit: int) -> str:
     normalized_filter = str(filter_text or "").strip()
-    title = "?? <b>LOGS RECENTES</b>"
+    title = "<b>LOGS RECENTES</b>"
     subtitle = f"Filtro: <b>{html.escape(normalized_filter or 'geral')}</b> | Itens: <b>{len(lines)}</b>"
     help_line = "Use: <code>/logs erro</code>, <code>/logs trade</code>, <code>/logs guard</code>, <code>/logs ciclo</code>"
 
@@ -843,7 +843,7 @@ def _build_dash_message(context: dict) -> str:
     confidence = _num(decision.get("confidence_pct", payload.get("confidence_pct")), 0.0) or 0.0
 
     lines = [
-        "<b>DASHBOARD</b>",
+        "<b>DASHBOARD FINANCEIRO</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{runtime['runtime_emoji']} <b>Runtime:</b> {html.escape(runtime['runtime_label'])}",
         f"📡 <b>Situação:</b> {html.escape(runtime['situation_label'])}",
@@ -868,7 +868,7 @@ def _build_dash_message(context: dict) -> str:
     alerts = _build_alert_lines(runtime, exchange_status, context["exchange_error"])
     if alerts:
         lines.append("")
-        lines.append("?? <b>ALERTAS</b>")
+        lines.append("⚠️ <b>ALERTAS</b>")
         lines.extend(alerts[:3])
 
     return "\n".join(lines)
@@ -893,7 +893,7 @@ def _build_status_message(context: dict) -> str:
     buy_votes = int(votes.get("buy", 0) or 0) if isinstance(votes, dict) else 0
     hold_votes = int(votes.get("hold", 0) or 0) if isinstance(votes, dict) else 0
     sell_votes = int(votes.get("sell", 0) or 0) if isinstance(votes, dict) else 0
-   
+
     confidence = _num(decision.get("confidence_pct", payload.get("confidence_pct")), 0.0) or 0.0
     risk_pct = _num(validation.get("risk_pct"), None)
     risk_amount = _num(validation.get("risk_amount"), None)
@@ -902,7 +902,7 @@ def _build_status_message(context: dict) -> str:
     execution_action = _execution_action_label(payload)
 
     lines = [
-        "<b>STATUS</b>",
+        "<b>STATUS COMPLETO DO BOT</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{runtime['runtime_emoji']} <b>Runtime:</b> {html.escape(runtime['runtime_label'])}",
         f"📡 <b>Situação:</b> {html.escape(runtime['situation_label'])}",
@@ -930,7 +930,7 @@ def _build_status_message(context: dict) -> str:
     alerts = _build_alert_lines(runtime, exchange_status, exchange_error)
     if alerts:
         lines.append("")
-        lines.append("?? <b>ALERTAS E DIAGNÓSTICO</b>")
+        lines.append("⚠️ <b>ALERTAS E DIAGNÓSTICO</b>")
         lines.extend(alerts)
 
     return "\n".join(lines)
@@ -1005,7 +1005,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not verificar_autorizacao(update):
         return
 
-    loading = await update.message.reply_text("? <b>Consultando runtime, exchange e diagnósticos...</b>", parse_mode="HTML")
+    loading = await update.message.reply_text("⏳ <b>Consultando runtime, exchange e diagnósticos...</b>", parse_mode="HTML")
     painel = await coletar_contexto_painel(TARGET_NETWORK)
     mensagem = _build_status_message(painel)
     await loading.edit_text(mensagem, parse_mode="HTML")
@@ -1015,7 +1015,7 @@ async def cmd_dash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not verificar_autorizacao(update):
         return
 
-    loading = await update.message.reply_text("? <b>Montando dashboard operacional...</b>", parse_mode="HTML")
+    loading = await update.message.reply_text("⏳ <b>Montando dashboard operacional...</b>", parse_mode="HTML")
     painel = await coletar_contexto_painel(TARGET_NETWORK)
     mensagem = _build_dash_message(painel)
     await loading.edit_text(mensagem, parse_mode="HTML")
@@ -1027,8 +1027,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = "\n".join(
         [
-            "?? <b>COMANDOS DISPONÍVEIS</b>",
-            "????????????????????",
+            "💡 <b>COMANDOS DISPONÍVEIS</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
             "• <code>/status</code> painel completo com runtime, posição, motivo, IA, risco e PnL do dia",
             "• <code>/dash</code> resumo rápido operacional e financeiro",
             "• <code>/logs</code> últimas linhas relevantes",
@@ -1053,12 +1053,12 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filter_parts: list[str] = []
     for arg in raw_args:
         if arg.isdigit():
-             limit = max(1, min(int(arg), 20))
+            limit = max(1, min(int(arg), 20))
         else:
             filter_parts.append(arg)
 
     filter_text = " ".join(filter_parts).strip() or None
-    loading = await update.message.reply_text("? <b>Consultando logs recentes...</b>", parse_mode="HTML")
+    loading = await update.message.reply_text("⏳ <b>Consultando logs recentes...</b>", parse_mode="HTML")
     lines = await asyncio.to_thread(ler_logs_recentes, filter_text, limit)
     mensagem = _build_logs_message(filter_text, lines, limit)
     await loading.edit_text(mensagem, parse_mode="HTML")
@@ -1072,11 +1072,11 @@ async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) == 0:
         cfg = carregar_config().get("environment", {})
         msg = "*Configurações Atuais:*\n\n"
-        msg += f"1?? Risco Máx: {cfg.get('max_risk_per_trade', 0.0) * 100:.1f}%\n"
-        msg += f"2?? Stop Loss: {cfg.get('stop_loss_pct', 0.0) * 100:.1f}%\n"
-        msg += f"3?? Take Profit: {cfg.get('take_profit_pct', 0.0) * 100:.1f}%\n"
-        msg += f"4?? Filtro Hold: {cfg.get('action_hold_threshold', 0.0)}\n"
-        msg += f"5?? Cooldown: {cfg.get('cooldown', 0)} candles\n\n"
+        msg += f"1️⃣ Risco Máx: {cfg.get('max_risk_per_trade', 0.0) * 100:.1f}%\n"
+        msg += f"2️⃣ Stop Loss: {cfg.get('stop_loss_pct', 0.0) * 100:.1f}%\n"
+        msg += f"3️⃣ Take Profit: {cfg.get('take_profit_pct', 0.0) * 100:.1f}%\n"
+        msg += f"4️⃣ Filtro Hold: {cfg.get('action_hold_threshold', 0.0)}\n"
+        msg += f"5️⃣ Cooldown: {cfg.get('cooldown', 0)} candles\n\n"
         msg += "Para alterar, use:\n`/config [risco|stop|tp|hold|cooldown] [valor]`\nExemplo: `/config cooldown 3`"
         await update.message.reply_text(msg, parse_mode="Markdown")
         return
@@ -1118,7 +1118,7 @@ async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def relatorio_diario(context: ContextTypes.DEFAULT_TYPE):
-    msg = f"*RELATÓRIO DIÁRIO - {date.today().strftime('%d/%m/%Y')}*\n\n"
+    msg = f"📊 *RELATÓRIO DIÁRIO - {date.today().strftime('%d/%m/%Y')}*\n\n"
     msg += "Fechamento do dia. O bot finalizou suas operações diárias.\n"
     await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
 
@@ -1126,7 +1126,7 @@ async def relatorio_diario(context: ContextTypes.DEFAULT_TYPE):
 async def relatorio_mensal(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().day != 1:
         return
-    msg = "?? *FECHAMENTO MENSAL*\n\nResumo do mês que passou...\n"
+    msg = "📆 *FECHAMENTO MENSAL*\n\nResumo do mês que passou...\n"
     await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
 
 
@@ -1137,6 +1137,7 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
 
+    # Registra os Comandos
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("off", cmd_off))
     app.add_handler(CommandHandler("status", cmd_status))
