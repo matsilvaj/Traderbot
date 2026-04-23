@@ -98,6 +98,46 @@ def calcular_estatisticas_diarias():
 # =====================================================================
 # 4. COMANDOS DO BOT (START, OFF, STATUS, ETC)
 # =====================================================================
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inicia as operações na Mainnet."""
+    if not verificar_autorizacao(update): return
+    
+    global trade_process
+    if trade_process is not None and trade_process.poll() is None:
+        await update.message.reply_text("O Bot já está rodando!")
+        return
+
+    await update.message.reply_text("Iniciando o TraderBot na MAINNET com live trading ativado...")
+    
+    # Ele executa o trade bot como um subprocesso dentro do mesmo container
+    cmd = [
+        "python", "-m", "traderbot.main",
+        "--config", str(CONFIG_PATH),
+        "--network-override", "mainnet",
+        "--execution-mode-override", "exchange",
+        "--allow-live-trading",
+        "run"
+    ]
+    
+    trade_process = subprocess.Popen(cmd, cwd=str(REPO_ROOT))
+    await update.message.reply_text("Bot iniciado com sucesso em background!")
+
+async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Para as operações do bot."""
+    if not verificar_autorizacao(update): return
+    
+    global trade_process
+    if trade_process is None or trade_process.poll() is not None:
+        await update.message.reply_text("O bot já está desligado.")
+        return
+
+    await update.message.reply_text("Desligando o bot... (Fechando processos)")
+    trade_process.terminate()
+    trade_process.wait()
+    trade_process = None
+    
+    await update.message.reply_text("Bot encerrado.")
+    
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mostra o status detalhado, IA e filtros."""
     if not verificar_autorizacao(update): return
