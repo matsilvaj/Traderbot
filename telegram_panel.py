@@ -843,34 +843,26 @@ def _build_dash_message(context: dict) -> str:
     confidence = _num(decision.get("confidence_pct", payload.get("confidence_pct")), 0.0) or 0.0
 
     lines = [
-        "?? <b>DASHBOARD OPERACIONAL</b>",
-        "????????????????????",
+        "<b>DASHBOARD</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{runtime['runtime_emoji']} <b>Runtime:</b> {html.escape(runtime['runtime_label'])}",
-        f"?? <b>Situação:</b> {html.escape(runtime['situation_label'])}",
-        f"?? <b>Resumo:</b> {html.escape(runtime['situation_message'])}",
-        f"?? <b>Exchange:</b> {html.escape(_exchange_health_label(exchange_status))}",
-        f"?? <b>Modo:</b> {html.escape(TARGET_NETWORK.upper())} | "
-        f"{html.escape(str(cfg.get('hyperliquid', {}).get('symbol', 'BTC')))} | "
-        f"{html.escape(str(cfg.get('hyperliquid', {}).get('timeframe', '1h')))}",
-        f"?? <b>Heartbeat:</b> {html.escape(_format_local_dt(runtime.get('heartbeat_at')))} "
-        f"({html.escape(_format_age(runtime.get('heartbeat_age_seconds')))})",
+        f"📡 <b>Situação:</b> {html.escape(runtime['situation_label'])}",
+        f"ℹ️ <b>Resumo:</b> {html.escape(runtime['situation_message'])}",
         "",
-        f"?? <b>Patrimônio:</b> {html.escape(_format_usd(equity))}",
-        f"?? <b>Disponível:</b> {html.escape(_format_usd(available))}",
-        f"?? <b>Drawdown:</b> {html.escape(_format_ratio_pct(drawdown))}",
-        f"?? <b>PnL em aberto:</b> {html.escape(_format_usd(position['pnl']))}",
+        f"💵 <b>Patrimônio:</b> {html.escape(_format_usd(equity))}",
+        f"📉 <b>Drawdown:</b> {html.escape(_format_ratio_pct(drawdown))}",
+        f"💰 <b>PnL em aberto:</b> {html.escape(_format_usd(position['pnl']))}",
         "",
-        f"?? <b>HOJE ({datetime.now().strftime('%d/%m')})</b>",
-        f"? <b>Operações do dia:</b> {stats['operacoes']}",
-        f"?? <b>Encerradas:</b> {stats['fechadas']}",
-        f"?? <b>Bloqueadas:</b> {stats['bloqueadas']}",
-        f"?? <b>Winrate:</b> {stats['winrate']:.1f}%",
-        f"?? <b>PnL fechado:</b> {html.escape(_format_usd(stats['pnl_fechado']))}",
+        f"📅 <b>RESUMO DE HOJE ({datetime.now().strftime('%d/%m')})</b>",
+        f"✅ <b>Operações do dia:</b> {stats['operacoes']}",
+        f"🏁 <b>Encerradas:</b> {stats['fechadas']}",
+        f"🧱 <b>Bloqueadas:</b> {stats['bloqueadas']}",
+        f"🎯 <b>Winrate:</b> {stats['winrate']:.1f}%",
+        f"💲 <b>PnL fechado:</b> {html.escape(_format_usd(stats['pnl_fechado']))}",
         "",
-        f"?? <b>Mercado:</b> {html.escape(_market_status_label(payload))} | BTC {html.escape(_format_price(price))}",
-        f"?? <b>IA:</b> {html.escape(_human_signal(decision.get('vote_bucket') or payload.get('vote_bucket')))} "
-        f"({confidence:.1f}%)",
-        f"?? <b>Posição:</b> {html.escape(position['label'])}",
+        f"📊 <b>Mercado:</b> {html.escape(_market_status_label(payload))} | BTC {html.escape(_format_price(price))}",
+        f"🧠 <b>IA:</b> {html.escape(_human_signal(decision.get('vote_bucket') or payload.get('vote_bucket')))} ({confidence:.1f}%)",
+        f"⚖️ <b>Posição:</b> {html.escape(position['label'])}",
     ]
 
     alerts = _build_alert_lines(runtime, exchange_status, context["exchange_error"])
@@ -910,59 +902,29 @@ def _build_status_message(context: dict) -> str:
     execution_action = _execution_action_label(payload)
 
     lines = [
-        "??? <b>STATUS COMPLETO DO BOT</b>",
-        "????????????????????",
+        "<b>STATUS</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{runtime['runtime_emoji']} <b>Runtime:</b> {html.escape(runtime['runtime_label'])}",
-        f"?? <b>Situação:</b> {html.escape(runtime['situation_label'])}",
-        f"?? <b>Resumo:</b> {html.escape(runtime['situation_message'])}",
-        f"?? <b>Exchange:</b> {html.escape(_exchange_health_label(exchange_status))}",
-        f"?? <b>Modo:</b> {html.escape(TARGET_NETWORK.upper())} | "
-        f"{html.escape(str(cfg.get('hyperliquid', {}).get('symbol', 'BTC')))} | "
-        f"{html.escape(str(cfg.get('hyperliquid', {}).get('timeframe', '1h')))} | "
-        f"{html.escape(TARGET_EXECUTION_MODE)}",
-        f"?? <b>Heartbeat:</b> {html.escape(_format_local_dt(runtime.get('heartbeat_at')))} "
-        f"({html.escape(_format_age(runtime.get('heartbeat_age_seconds')))})",
-        f"??? <b>Última vela:</b> {html.escape(_format_local_dt(runtime.get('bar_timestamp')))}",
-        f"??? <b>Último evento:</b> {html.escape(runtime.get('event_code', '--'))}",
-        f"?? <b>Motivo atual:</b> {html.escape(_clip(current_reason, 180))}",
-        f"?? <b>Ação da engine:</b> {html.escape(execution_action)}",
+        f"📡 <b>Situação:</b> {html.escape(runtime['situation_label'])}",
+        f"ℹ️ <b>Resumo:</b> {html.escape(runtime['situation_message'])}",
+        f"🚧 <b>Motivo atual:</b> {html.escape(_clip(current_reason, 180))}",
         "",
-        "?? <b>POSIÇÃO E RISCO</b>",
+        "📊 <b>POSIÇÃO E RISCO</b>",
         f"• <b>Posição:</b> {html.escape(position['label'])}",
         f"• <b>PnL aberto:</b> {html.escape(_format_usd(position['pnl']))}",
         f"• <b>Entrada:</b> {html.escape(_format_price(position['entry']))}",
         f"• <b>TP / SL:</b> {html.escape(_format_price(position['tp']))} / {html.escape(_format_price(position['sl']))}",
-        f"• <b>Volume:</b> {html.escape(_format_plain_number(position['size'], digits=4))}",
-        f"• <b>Notional:</b> {html.escape(_format_usd(position['notional']))}",
         f"• <b>Tempo em posição:</b> {html.escape(_format_plain_number(position['time_in_bars'], digits=0))} candles",
-        f"• <b>Patrimônio:</b> {html.escape(_format_usd(account.get('equity')))}",
-        f"• <b>Disponível:</b> {html.escape(_format_usd(account.get('available_to_trade', exchange_status.get('available_to_trade'))))}",
-        f"• <b>Drawdown:</b> {html.escape(_format_ratio_pct(account.get('drawdown_pct')))}",
-        f"• <b>Risco por trade:</b> "
-        f"{html.escape(_format_pct(risk_pct * 100.0 if risk_pct is not None else None))} "
-        f"({html.escape(_format_usd(risk_amount))})",
-        f"• <b>Notional alvo:</b> {html.escape(_format_usd(target_notional))}",
-        f"• <b>Proteção nativa:</b> {html.escape(protection)}",
         "",
-        "?? <b>MERCADO E IA</b>",
+        "🧠 <b>MERCADO E IA</b>",
         f"• <b>Mercado:</b> {html.escape(_market_status_label(payload))}",
         f"• <b>Preço BTC:</b> {html.escape(_format_price(exchange_status.get('latest_mid', payload.get('reference_price'))))}",
-        f"• <b>Decisão:</b> {html.escape(_human_signal(decision.get('vote_bucket') or payload.get('vote_bucket')))} "
-        f"({confidence:.1f}%)",
-        f"• <b>Placar:</b> ?? {buy_votes} | ?? {hold_votes} | ?? {sell_votes}",
-        f"• <b>RSI / Vol Z:</b> "
-        f"{html.escape(_format_plain_number(features.get('rsi_14'), digits=1))} / "
-        f"{html.escape(_format_plain_number(features.get('volume_zscore_20'), digits=2))}",
-        f"• <b>Dist. EMA240:</b> {html.escape(_format_plain_number(filters.get('regime_dist_ema_240'), digits=5))}",
-        f"• <b>Seeds:</b> {html.escape(_model_vote_summary(payload))}",
+        f"• <b>Decisão:</b> {html.escape(_human_signal(decision.get('vote_bucket') or payload.get('vote_bucket')))} ({confidence:.1f}%)",
         "",
-        f"?? <b>HOJE ({datetime.now().strftime('%d/%m')})</b>",
-        f"• <b>Operações:</b> {stats['operacoes']}",
-        f"• <b>Encerradas:</b> {stats['fechadas']} | <b>Bloqueadas:</b> {stats['bloqueadas']}",
-        f"• <b>Winrate:</b> {stats['winrate']:.1f}% ({stats['vitorias']}V/{stats['derrotas']}D)",
-        f"• <b>PnL do dia:</b> {html.escape(_format_usd(stats['pnl_fechado']))}",
-        f"• <b>Última ação/operação:</b> {html.escape(str(stats.get('ultimo_evento', '--')))} "
-        f"às {html.escape(str(stats.get('ultima_hora', '--')))}",
+        f"• <b>Placar:</b> 🟢 {buy_votes} | 🟡 {hold_votes} | 🔴 {sell_votes}",
+        f"• <b>RSI / Vol Z:</b> {html.escape(_format_plain_number(features.get('rsi_14'), digits=1))} / {html.escape(_format_plain_number(features.get('volume_zscore_20'), digits=2))}",
+        f"• <b>Dist. EMA240:</b> {html.escape(_format_plain_number(filters.get('regime_dist_ema_240'), digits=5))}",
+        f"• <b>Seeds:</b>\n{html.escape(_model_vote_summary(payload))}",
     ]
 
     alerts = _build_alert_lines(runtime, exchange_status, exchange_error)
