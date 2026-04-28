@@ -2,7 +2,9 @@
 import asyncio
 import html
 import json
+import logging
 import os
+import traceback
 from collections import deque
 import subprocess
 import sys
@@ -12,6 +14,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 from telegram import Update
+from telegram.error import NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -43,6 +46,22 @@ load_dotenv(REPO_ROOT / ".env")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "SEU_TOKEN_AQUI")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "SEU_CHAT_ID_AQUI")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+ERROR_ALERT_THROTTLE_SECONDS = max(60, _env_int("TELEGRAM_PANEL_ERROR_ALERT_THROTTLE_SECONDS", 900))
+ERROR_ALERT_RETRY_SECONDS = max(15, _env_int("TELEGRAM_PANEL_ERROR_ALERT_RETRY_SECONDS", 60))
+ERROR_ALERT_MAX_LENGTH = 3900
+
+logger = logging.getLogger(__name__)
+pending_error_alerts: deque[str] = deque(maxlen=5)
+last_error_alert_at: dict[str, float] = {}
 
 trade_process = None
 
@@ -1130,7 +1149,126 @@ async def relatorio_mensal(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
 
 
+def _error_fingerprint(error: BaseException | None) -> str:
+    if error is None:
+        return "unknown"
+    summary = str(error).strip() or repr(error)
+    return f"{error.__class__.__module__}.{error.__class__.__name__}:{summary[:160]}"
+
+
+def _should_queue_error_alert(error: BaseException | None) -> bool:
+    now = datetime.now().timestamp()
+    fingerprint = _error_fingerprint(error)
+    last_sent_at = last_error_alert_at.get(fingerprint)
+    if last_sent_at is not None and now - last_sent_at < ERROR_ALERT_THROTTLE_SECONDS:
+        return False
+    last_error_alert_at[fingerprint] = now
+    return True
+
+
+def _format_update_context(update: object | None) -> str:
+    if not isinstance(update, Update):
+        return "Origem: polling/job sem update associado"
+
+    parts = []
+    if update.effective_chat is not None:
+        parts.append(f"chat_id={update.effective_chat.id}")
+    if update.effective_user is not None:
+        user_label = update.effective_user.username or update.effective_user.full_name or update.effective_user.id
+        parts.append(f"user={user_label}")
+    if update.effective_message is not None and update.effective_message.text:
+        parts.append(f"mensagem={_clip(update.effective_message.text, 120)}")
+
+    return "Origem: " + (" | ".join(str(part) for part in parts) if parts else "update sem detalhes")
+
+
+def _build_error_alert_message(error: BaseException | None, update: object | None) -> str:
+    error_type = error.__class__.__name__ if error is not None else "Unknown"
+    summary = str(error).strip() if error is not None else "Erro desconhecido"
+    if not summary and error is not None:
+        summary = repr(error)
+
+    lines = [
+        "ALERTA PAINEL TELEGRAM",
+        "",
+        "Erro capturado pelo painel de comandos.",
+        f"Tipo: {error_type}",
+        f"Resumo: {_clip(summary, 700)}",
+        f"Horario: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+        _format_update_context(update),
+    ]
+
+    if isinstance(error, NetworkError):
+        lines.extend(
+            [
+                "",
+                "Contexto: falha de rede/API do Telegram durante polling ou envio.",
+                "Acao: o painel continua tentando reconectar automaticamente.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Acao: verifique os logs do container para o traceback completo.",
+            ]
+        )
+
+    if error is not None and error.__traceback__ is not None:
+        trace_text = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        trace_tail = "\n".join(trace_text.splitlines()[-12:])
+        if trace_tail:
+            lines.extend(["", "Trecho do traceback:", _clip(trace_tail, 1600)])
+
+    message = "\n".join(lines)
+    if len(message) > ERROR_ALERT_MAX_LENGTH:
+        return message[: ERROR_ALERT_MAX_LENGTH - 3].rstrip() + "..."
+    return message
+
+
+async def flush_pending_error_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
+    while pending_error_alerts:
+        try:
+            await context.bot.send_message(chat_id=CHAT_ID, text=pending_error_alerts[0])
+        except Exception as exc:
+            logger.warning(
+                "Nao foi possivel enviar alerta de erro pelo Telegram; tentaremos novamente.",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            return
+        pending_error_alerts.popleft()
+
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        error = context.error
+        if error is None:
+            logger.error("Erro desconhecido no painel do Telegram sem context.error.")
+            return
+
+        logger.error(
+            "Erro no painel do Telegram.",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+        if not _should_queue_error_alert(error):
+            return
+
+        pending_error_alerts.append(_build_error_alert_message(error, update))
+        await flush_pending_error_alerts(context)
+    except Exception as exc:
+        logger.error(
+            "Falha no proprio handler de erro do painel do Telegram.",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
     if TOKEN == "SEU_TOKEN_AQUI" or CHAT_ID == "SEU_CHAT_ID_AQUI" or not TOKEN:
         print("ALERTA: Configure o TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID no seu arquivo .env!")
         return
@@ -1145,9 +1283,16 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("config", cmd_config))
+    app.add_error_handler(telegram_error_handler)
 
     app.job_queue.run_daily(relatorio_diario, time(hour=23, minute=55))
     app.job_queue.run_daily(relatorio_mensal, time(hour=9, minute=0))
+    app.job_queue.run_repeating(
+        flush_pending_error_alerts,
+        interval=ERROR_ALERT_RETRY_SECONDS,
+        first=ERROR_ALERT_RETRY_SECONDS,
+        name="flush_pending_error_alerts",
+    )
 
     print("Painel do Telegram iniciado com sucesso! Aguardando comandos...")
     app.run_polling()
