@@ -55,9 +55,58 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-ERROR_ALERT_THROTTLE_SECONDS = max(60, _env_int("TELEGRAM_PANEL_ERROR_ALERT_THROTTLE_SECONDS", 900))
-ERROR_ALERT_RETRY_SECONDS = max(15, _env_int("TELEGRAM_PANEL_ERROR_ALERT_RETRY_SECONDS", 60))
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off", "nao"}
+
+
+ERROR_ALERT_THROTTLE_SECONDS = max(
+    60,
+    _env_int("TELEGRAM_PANEL_ERROR_ALERT_THROTTLE_SECONDS", 900),
+)
+ERROR_ALERT_RETRY_SECONDS = max(
+    15,
+    _env_int("TELEGRAM_PANEL_ERROR_ALERT_RETRY_SECONDS", 60),
+)
 ERROR_ALERT_MAX_LENGTH = 3900
+ERROR_ALERT_SUPPRESS_POLLING_NETWORK = _env_bool(
+    "TELEGRAM_PANEL_SUPPRESS_POLLING_NETWORK_ALERTS",
+    True,
+)
+TELEGRAM_POLL_TIMEOUT_SECONDS = max(5, _env_int("TELEGRAM_PANEL_POLL_TIMEOUT_SECONDS", 20))
+TELEGRAM_CONNECT_TIMEOUT_SECONDS = max(
+    3.0,
+    _env_float("TELEGRAM_PANEL_CONNECT_TIMEOUT_SECONDS", 10.0),
+)
+TELEGRAM_READ_TIMEOUT_SECONDS = max(
+    5.0,
+    _env_float("TELEGRAM_PANEL_READ_TIMEOUT_SECONDS", 30.0),
+)
+TELEGRAM_WRITE_TIMEOUT_SECONDS = max(
+    5.0,
+    _env_float("TELEGRAM_PANEL_WRITE_TIMEOUT_SECONDS", 20.0),
+)
+TELEGRAM_POOL_TIMEOUT_SECONDS = max(
+    3.0,
+    _env_float("TELEGRAM_PANEL_POOL_TIMEOUT_SECONDS", 10.0),
+)
+TELEGRAM_GET_UPDATES_READ_TIMEOUT_SECONDS = max(
+    float(TELEGRAM_POLL_TIMEOUT_SECONDS) + 5.0,
+    _env_float(
+        "TELEGRAM_PANEL_GET_UPDATES_READ_TIMEOUT_SECONDS",
+        TELEGRAM_POLL_TIMEOUT_SECONDS + 15.0,
+    ),
+)
+TELEGRAM_BOOTSTRAP_RETRIES = _env_int("TELEGRAM_PANEL_BOOTSTRAP_RETRIES", 3)
 
 logger = logging.getLogger(__name__)
 pending_error_alerts: deque[str] = deque(maxlen=5)
@@ -1182,6 +1231,14 @@ def _format_update_context(update: object | None) -> str:
     return "Origem: " + (" | ".join(str(part) for part in parts) if parts else "update sem detalhes")
 
 
+def _is_polling_network_error(error: BaseException | None, update: object | None) -> bool:
+    return (
+        ERROR_ALERT_SUPPRESS_POLLING_NETWORK
+        and isinstance(error, NetworkError)
+        and not isinstance(update, Update)
+    )
+
+
 def _build_error_alert_message(error: BaseException | None, update: object | None) -> str:
     error_type = error.__class__.__name__ if error is not None else "Unknown"
     summary = str(error).strip() if error is not None else "Erro desconhecido"
@@ -1246,6 +1303,14 @@ async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_T
             logger.error("Erro desconhecido no painel do Telegram sem context.error.")
             return
 
+        if _is_polling_network_error(error, update):
+            logger.warning(
+                "Falha transitoria na API do Telegram durante polling/job; "
+                "o painel seguira reconectando automaticamente: %s",
+                str(error).strip() or repr(error),
+            )
+            return
+
         logger.error(
             "Erro no painel do Telegram.",
             exc_info=(type(error), error, error.__traceback__),
@@ -1273,7 +1338,19 @@ def main():
         print("ALERTA: Configure o TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID no seu arquivo .env!")
         return
 
-    app = Application.builder().token(TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .connect_timeout(TELEGRAM_CONNECT_TIMEOUT_SECONDS)
+        .read_timeout(TELEGRAM_READ_TIMEOUT_SECONDS)
+        .write_timeout(TELEGRAM_WRITE_TIMEOUT_SECONDS)
+        .pool_timeout(TELEGRAM_POOL_TIMEOUT_SECONDS)
+        .get_updates_connect_timeout(TELEGRAM_CONNECT_TIMEOUT_SECONDS)
+        .get_updates_read_timeout(TELEGRAM_GET_UPDATES_READ_TIMEOUT_SECONDS)
+        .get_updates_write_timeout(TELEGRAM_WRITE_TIMEOUT_SECONDS)
+        .get_updates_pool_timeout(TELEGRAM_POOL_TIMEOUT_SECONDS)
+        .build()
+    )
 
     # Registra os Comandos
     app.add_handler(CommandHandler("start", cmd_start))
@@ -1295,7 +1372,10 @@ def main():
     )
 
     print("Painel do Telegram iniciado com sucesso! Aguardando comandos...")
-    app.run_polling()
+    app.run_polling(
+        timeout=TELEGRAM_POLL_TIMEOUT_SECONDS,
+        bootstrap_retries=TELEGRAM_BOOTSTRAP_RETRIES,
+    )
 
 
 if __name__ == "__main__":
