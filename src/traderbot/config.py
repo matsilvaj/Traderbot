@@ -9,6 +9,9 @@ import yaml
 from dotenv import load_dotenv
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
 @dataclass
 class PathsConfig:
     models_dir: str = "models"
@@ -197,6 +200,44 @@ def _deep_update(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any
     return base
 
 
+def resolve_config_path(config_path: str | Path = "config.yaml") -> Path:
+    """Resolve o config mesmo quando o processo inicia fora da raiz do projeto."""
+    raw_path = Path(config_path).expanduser()
+    if raw_path.is_absolute():
+        return raw_path.resolve()
+
+    cwd_candidate = (Path.cwd() / raw_path).resolve()
+    if cwd_candidate.exists():
+        return cwd_candidate
+
+    project_candidate = (PROJECT_ROOT / raw_path).resolve()
+    if project_candidate.exists():
+        return project_candidate
+
+    return cwd_candidate
+
+
+def _resolve_project_path(value: str | Path | None, base_dir: Path) -> str | None:
+    if value is None:
+        return None
+    path_text = str(value).strip()
+    if not path_text:
+        return path_text
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return str(path)
+    return str((base_dir / path).resolve())
+
+
+def _resolve_relative_paths(cfg: AppConfig, base_dir: Path) -> AppConfig:
+    cfg.paths.models_dir = _resolve_project_path(cfg.paths.models_dir, base_dir) or cfg.paths.models_dir
+    cfg.paths.results_dir = _resolve_project_path(cfg.paths.results_dir, base_dir) or cfg.paths.results_dir
+    cfg.paths.logs_dir = _resolve_project_path(cfg.paths.logs_dir, base_dir) or cfg.paths.logs_dir
+    if cfg.data.csv_path:
+        cfg.data.csv_path = _resolve_project_path(cfg.data.csv_path, base_dir)
+    return cfg
+
+
 def _build_config(raw: dict[str, Any]) -> AppConfig:
     execution_raw = dict(raw.get("execution", {}))
     environment_raw = dict(raw.get("environment", {}))
@@ -228,21 +269,22 @@ def _build_config(raw: dict[str, Any]) -> AppConfig:
 
 def load_config(config_path: str | Path = "config.yaml") -> AppConfig:
     """Carrega configuração do YAML + variáveis de ambiente."""
-    config_path = Path(config_path)
-    env_path = config_path.resolve().parent / ".env"
+    path = resolve_config_path(config_path)
+    base_dir = path.parent if path.exists() else PROJECT_ROOT
+    env_path = base_dir / ".env"
     if env_path.exists():
         load_dotenv(dotenv_path=env_path, override=True)
     else:
         load_dotenv(override=True)
 
     base = asdict(AppConfig())
-    path = Path(config_path)
     if path.exists():
         with path.open("r", encoding="utf-8") as f:
             user_cfg = yaml.safe_load(f) or {}
         base = _deep_update(base, user_cfg)
 
     cfg = _build_config(base)
+    cfg = _resolve_relative_paths(cfg, base_dir)
 
     # Permite segredos via .env
     def _clean_env(name: str) -> Optional[str]:

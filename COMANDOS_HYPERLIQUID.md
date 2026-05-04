@@ -54,3 +54,33 @@ Use só se quiser testar outro valor para a agressividade da ordem na exchange.
 ```powershell
 python -m traderbot.main --config config.yaml --network-override testnet --execution-mode-override exchange --allow-live-trading --order-slippage-override 0.05 run
 ```
+
+## VPS / Docker
+
+Subir apenas o painel Telegram:
+
+```powershell
+docker compose up -d traderbot
+```
+
+No painel Telegram, use:
+
+```text
+/sinais 24
+```
+
+Esse comando mostra se os ultimos ciclos ficaram em HOLD, geraram BUY/SELL, foram bloqueados por filtro/risco, ou abriram entrada.
+
+Subir o runtime headless direto, com os mesmos defaults do launcher/painel:
+
+```powershell
+docker compose --profile runtime up -d traderbot-runtime
+```
+
+Para trocar rede ou modo na VPS:
+
+```env
+TRADERBOT_NETWORK=mainnet
+TRADERBOT_EXECUTION_MODE=exchange
+TRADERBOT_ALLOW_LIVE_TRADING=true
+```

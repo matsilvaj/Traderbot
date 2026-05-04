@@ -142,6 +142,27 @@ python -m traderbot.main --config config.yaml run
 
 Para nao precisar editar o `config.yaml`, use os comandos prontos em [COMANDOS_HYPERLIQUID.md](C:\Users\Matheus\Documents\Traderbot\COMANDOS_HYPERLIQUID.md).
 
+## VPS / Docker
+
+O `docker-compose up -d` sobe o painel Telegram. Para iniciar o runtime pelo painel, use `/start` no Telegram.
+Use `/sinais 24` no painel para ver, nos ultimos ciclos, se o bot ficou em HOLD, se teve BUY/SELL, se o sinal foi bloqueado por filtro/risco, ou se virou entrada.
+
+Para subir o runtime headless direto pela VPS, use o profile `runtime`:
+
+```powershell
+docker compose --profile runtime up -d traderbot-runtime
+```
+
+O modo headless usa os mesmos overrides do launcher/painel por variavel de ambiente:
+
+```env
+TRADERBOT_NETWORK=mainnet
+TRADERBOT_EXECUTION_MODE=exchange
+TRADERBOT_ALLOW_LIVE_TRADING=true
+```
+
+O container tambem copia `data/` e `models/` no build para evitar que uma imagem sem volume suba sem historico/modelos e fique treinando em vez de operar.
+
 ## Modos Operacionais
 
 - `paper_local`

@@ -20,8 +20,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 REPO_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = REPO_ROOT / "config.yaml"
 LOGS_DIR = REPO_ROOT / "logs"
-TARGET_NETWORK = "mainnet"
-TARGET_EXECUTION_MODE = "exchange"
 
 ACTIVE_RUNTIME_STATUSES = {
     "starting",
@@ -67,6 +65,16 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return str(raw).strip().lower() not in {"0", "false", "no", "off", "nao"}
+
+
+def _env_choice(name: str, default: str, choices: set[str]) -> str:
+    raw = str(os.getenv(name, default) or default).strip().lower()
+    return raw if raw in choices else default
+
+
+TARGET_NETWORK = _env_choice("TRADERBOT_NETWORK", "mainnet", {"mainnet", "testnet"})
+TARGET_EXECUTION_MODE = _env_choice("TRADERBOT_EXECUTION_MODE", "exchange", {"exchange", "paper_local"})
+TARGET_ALLOW_LIVE_TRADING = _env_bool("TRADERBOT_ALLOW_LIVE_TRADING", True)
 
 
 ERROR_ALERT_THROTTLE_SECONDS = max(
@@ -861,6 +869,212 @@ def ler_logs_recentes(filter_text: str | None = None, limit: int = 8) -> list[st
     return deduped[-limit:]
 
 
+def _cycle_log_candidates() -> list[Path]:
+    files = [path for path in LOGS_DIR.glob("traderbot-rl.log*") if path.is_file()]
+    return sorted(files, key=lambda path: (path.stat().st_mtime, path.name))
+
+
+def ler_ciclos_recentes(network: str = TARGET_NETWORK, limit: int = 24) -> list[dict]:
+    limit = max(1, min(int(limit), 72))
+    target_network = str(network or TARGET_NETWORK).strip().lower()
+    collected: deque[dict] = deque(maxlen=limit)
+    seen_payloads: set[str] = set()
+
+    for path in _cycle_log_candidates():
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                for raw_line in handle:
+                    if "Ciclo runtime HL |" not in raw_line:
+                        continue
+                    try:
+                        _, json_blob = raw_line.split("Ciclo runtime HL |", 1)
+                        payload = json.loads(json_blob.strip())
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    payload_network = str(payload.get("network") or "").strip().lower()
+                    if target_network and payload_network != target_network:
+                        continue
+                    fingerprint = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+                    if fingerprint in seen_payloads:
+                        continue
+                    seen_payloads.add(fingerprint)
+                    collected.append(payload)
+        except OSError:
+            continue
+
+    return list(collected)
+
+
+def _payload_decision(payload: dict) -> dict:
+    decision = payload.get("decision")
+    return decision if isinstance(decision, dict) else {}
+
+
+def _payload_execution(payload: dict) -> dict:
+    execution = payload.get("execution")
+    return execution if isinstance(execution, dict) else {}
+
+
+def _payload_filters(payload: dict) -> dict:
+    filters = payload.get("filters")
+    return filters if isinstance(filters, dict) else {}
+
+
+def _cycle_signal_bucket(payload: dict) -> str:
+    decision = _payload_decision(payload)
+    raw = (
+        decision.get("vote_bucket")
+        or decision.get("signal_bucket")
+        or payload.get("vote_bucket")
+        or payload.get("signal_bucket")
+        or "hold"
+    )
+    return str(raw or "hold").strip().lower()
+
+
+def _cycle_blocked_reason(payload: dict) -> str:
+    filters = _payload_filters(payload)
+    return str(
+        payload.get("blocked_reason")
+        or filters.get("blocked_reason")
+        or ""
+    ).strip().lower()
+
+
+def _cycle_error(payload: dict) -> str:
+    execution = _payload_execution(payload)
+    return str(payload.get("error") or execution.get("error") or "").strip()
+
+
+def _cycle_opened(payload: dict) -> bool:
+    execution = _payload_execution(payload)
+    return bool(payload.get("opened_trade") or execution.get("opened_trade"))
+
+
+def _cycle_regime_ok(payload: dict) -> bool | None:
+    filters = _payload_filters(payload)
+    raw = filters.get("regime_valid_for_entry", payload.get("regime_valid"))
+    if raw is None:
+        return None
+    return bool(raw)
+
+
+def _cycle_status_label(payload: dict) -> str:
+    signal = _cycle_signal_bucket(payload).upper()
+    blocked_reason = _cycle_blocked_reason(payload)
+    error = _cycle_error(payload)
+    if _cycle_opened(payload):
+        return f"{signal} -> ENTRADA"
+    if error:
+        return f"{signal} -> ERRO"
+    if blocked_reason:
+        return f"{signal} -> BLOQUEADO ({_human_block_label(blocked_reason)})"
+    if signal == "HOLD":
+        return "HOLD -> SEM SINAL"
+    return f"{signal} -> LIBERADO, SEM ABERTURA"
+
+
+def _cycle_time_label(payload: dict) -> str:
+    bar = _parse_iso_datetime(payload.get("bar_timestamp"))
+    if bar is not None:
+        return _format_local_dt(bar)
+    timestamp = _parse_iso_datetime(payload.get("timestamp"))
+    return _format_local_dt(timestamp, default="--")
+
+
+def _build_sinais_message(payloads: list[dict], limit: int, network: str = TARGET_NETWORK) -> str:
+    if not payloads:
+        return "\n".join(
+            [
+                "<b>DIAGNOSTICO DE SINAIS</b>",
+                f"Rede: <b>{html.escape(str(network).upper())}</b> | Ciclos lidos: <b>0</b>",
+                "",
+                "Nenhum ciclo encontrado nos logs do runtime.",
+                "Se o runtime esta rodando, verifique <code>/status</code> e <code>/logs ciclo</code>.",
+            ]
+        )
+
+    counts = {
+        "buy": 0,
+        "sell": 0,
+        "hold": 0,
+        "opened": 0,
+        "blocked": 0,
+        "errors": 0,
+        "regime_ok": 0,
+        "regime_blocked": 0,
+        "live_signal_without_open": 0,
+    }
+    block_counts: dict[str, int] = {}
+
+    for payload in payloads:
+        signal = _cycle_signal_bucket(payload)
+        if signal in {"buy", "sell", "hold"}:
+            counts[signal] += 1
+        opened = _cycle_opened(payload)
+        blocked_reason = _cycle_blocked_reason(payload)
+        error = _cycle_error(payload)
+        regime_ok = _cycle_regime_ok(payload)
+
+        if opened:
+            counts["opened"] += 1
+        if blocked_reason:
+            counts["blocked"] += 1
+            block_counts[blocked_reason] = block_counts.get(blocked_reason, 0) + 1
+        if error:
+            counts["errors"] += 1
+        if regime_ok is True:
+            counts["regime_ok"] += 1
+        elif regime_ok is False:
+            counts["regime_blocked"] += 1
+        if signal in {"buy", "sell"} and not opened:
+            counts["live_signal_without_open"] += 1
+
+    block_summary = ", ".join(
+        f"{_human_block_label(reason)}: {count}"
+        for reason, count in sorted(block_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+    )
+    if not block_summary:
+        block_summary = "nenhum"
+
+    recent_lines = []
+    for payload in payloads[-8:]:
+        decision = _payload_decision(payload)
+        confidence = _num(decision.get("confidence_pct", payload.get("confidence_pct")), 0.0) or 0.0
+        recent_lines.append(
+            f"• <b>{html.escape(_cycle_time_label(payload))}</b> - "
+            f"{html.escape(_cycle_status_label(payload))} | conf {confidence:.1f}%"
+        )
+
+    if counts["opened"] > 0:
+        diagnosis = "Houve sinal liberado e entrada executada."
+    elif counts["buy"] + counts["sell"] == 0:
+        diagnosis = "Nao houve sinal direcional: o modelo ficou em HOLD."
+    elif counts["blocked"] > 0 or counts["errors"] > 0:
+        diagnosis = "Houve sinal direcional, mas ele foi bloqueado ou falhou antes da entrada."
+    else:
+        diagnosis = "Houve sinal direcional sem abertura registrada; vale checar exchange/cooldown no log completo."
+
+    lines = [
+        "<b>DIAGNOSTICO DE SINAIS</b>",
+        f"Rede: <b>{html.escape(str(network).upper())}</b> | Ultimos ciclos: <b>{len(payloads)}</b> de {limit}",
+        "",
+        f"<b>Leitura:</b> {html.escape(diagnosis)}",
+        "",
+        f"BUY: <b>{counts['buy']}</b> | SELL: <b>{counts['sell']}</b> | HOLD: <b>{counts['hold']}</b>",
+        f"Entradas: <b>{counts['opened']}</b> | Sinais sem entrada: <b>{counts['live_signal_without_open']}</b>",
+        f"Regime OK: <b>{counts['regime_ok']}</b> | Regime bloqueado: <b>{counts['regime_blocked']}</b>",
+        f"Bloqueios: <b>{counts['blocked']}</b> | Erros: <b>{counts['errors']}</b>",
+        f"Motivos: {html.escape(block_summary)}",
+        "",
+        "<b>Ultimos ciclos</b>",
+        *recent_lines,
+    ]
+    return "\n".join(lines)
+
+
 def _build_logs_message(filter_text: str | None, lines: list[str], limit: int) -> str:
     normalized_filter = str(filter_text or "").strip()
     title = "<b>LOGS RECENTES</b>"
@@ -1023,10 +1237,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text("Iniciando o TraderBot na MAINNET com live trading ativado...")
+    mode_label = f"{TARGET_NETWORK.upper()} / {TARGET_EXECUTION_MODE}"
+    live_label = "com live trading ativado" if TARGET_ALLOW_LIVE_TRADING else "sem override de live trading"
+    await update.message.reply_text(f"Iniciando o TraderBot em {mode_label} {live_label}...")
 
     cmd = [
         sys.executable,
+        "-u",
         "-m",
         "traderbot.main",
         "--config",
@@ -1035,9 +1252,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         TARGET_NETWORK,
         "--execution-mode-override",
         TARGET_EXECUTION_MODE,
-        "--allow-live-trading",
         "run",
     ]
+    if TARGET_ALLOW_LIVE_TRADING:
+        cmd.insert(-1, "--allow-live-trading")
 
     trade_process = subprocess.Popen(cmd, cwd=str(REPO_ROOT))
     await update.message.reply_text("Bot iniciado com sucesso em background!")
@@ -1104,6 +1322,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• <code>/logs trade</code> aberturas e fechamentos",
             "• <code>/logs guard</code> atuações do runtime guard",
             "• <code>/logs ciclo 12</code> últimos 12 eventos de ciclo",
+            "• <code>/sinais 24</code> diagnostico: HOLD, sinais, bloqueios e entradas",
             "• <code>/config</code> ver ou alterar parâmetros rápidos",
             "• <code>/start</code> iniciar o runtime",
             "• <code>/off</code> parar o processo iniciado por esta sessão",
@@ -1129,6 +1348,23 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loading = await update.message.reply_text("⏳ <b>Consultando logs recentes...</b>", parse_mode="HTML")
     lines = await asyncio.to_thread(ler_logs_recentes, filter_text, limit)
     mensagem = _build_logs_message(filter_text, lines, limit)
+    await loading.edit_text(mensagem, parse_mode="HTML")
+
+
+async def cmd_sinais(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not verificar_autorizacao(update):
+        return
+
+    limit = 24
+    for arg in context.args:
+        raw = str(arg).strip()
+        if raw.isdigit():
+            limit = max(1, min(int(raw), 72))
+            break
+
+    loading = await update.message.reply_text("Consultando historico de sinais...", parse_mode="HTML")
+    payloads = await asyncio.to_thread(ler_ciclos_recentes, TARGET_NETWORK, limit)
+    mensagem = _build_sinais_message(payloads, limit, TARGET_NETWORK)
     await loading.edit_text(mensagem, parse_mode="HTML")
 
 
@@ -1333,6 +1569,8 @@ def main():
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     if TOKEN == "SEU_TOKEN_AQUI" or CHAT_ID == "SEU_CHAT_ID_AQUI" or not TOKEN:
         print("ALERTA: Configure o TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID no seu arquivo .env!")
@@ -1359,6 +1597,7 @@ def main():
     app.add_handler(CommandHandler("dash", cmd_dash))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("logs", cmd_logs))
+    app.add_handler(CommandHandler("sinais", cmd_sinais))
     app.add_handler(CommandHandler("config", cmd_config))
     app.add_error_handler(telegram_error_handler)
 

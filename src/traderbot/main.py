@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from traderbot.config import AppConfig, TIMEFRAME_MINUTES_MAP, ensure_directories, load_config
+from traderbot.config import AppConfig, TIMEFRAME_MINUTES_MAP, ensure_directories, load_config, resolve_config_path
 from traderbot.data.hl_loader import HLDataLoader
 from traderbot.data.csv_loader import CSVDataLoader
 from traderbot.data.database import create_tables, database_unavailable_reason
@@ -2062,6 +2062,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    config_path = resolve_config_path(args.config)
     cfg = load_config(args.config)
     ensure_directories(cfg)
 
@@ -2075,6 +2076,15 @@ def main():
         logger=logger,
     )
     notifier = TelegramNotifier(logger=logger)
+    logger.info(
+        "Config carregada | config=%s | cwd=%s | models_dir=%s | logs_dir=%s | data_source=%s | csv_path=%s",
+        config_path,
+        Path.cwd(),
+        cfg.paths.models_dir,
+        cfg.paths.logs_dir,
+        cfg.data.source,
+        cfg.data.csv_path,
+    )
 
     try:
         if args.command == "backtest":
